@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+*.local
+*.tsbuildinfo
+
+# 환경변수 — API 키는 절대 커밋하지 않는다
+.env
+.env.*
+!.env.example
+/env
+
+# DB
+pgdata/
+
+# IDE / OS / 로컬 설정
+.vscode/
+.idea/
+.claude/settings.local.json
+.DS_Store
+Thumbs.db
+
+# 데이터 파이프라인 산출물
+data-pipeline/data/
+*.parquet
+*.csv
