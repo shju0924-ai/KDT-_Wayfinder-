@@ -113,7 +113,7 @@ class JobMatch(BaseModel):
     posting_count: int = Field(1, ge=1, description="같은 직무로 묶인 공고 수")
     job_title: str
     company: str | None = Field(None, description="공고를 낸 회사명")
-    region: str | None = Field(None, description="공고 지역: seoul | gg")
+    region: str | None = Field(None, description="공고 지역: seoul | gg | incheon")
     source_url: str | None = Field(None, description="원본 채용공고 상세 페이지 URL")
     requirement_excerpt: str | None = Field(None, description="요구역량 판단 근거가 된 공고 발췌")
     fit_score: float = Field(..., ge=0, le=100, description="역량 적합도 (벡터 유사도 기반)")

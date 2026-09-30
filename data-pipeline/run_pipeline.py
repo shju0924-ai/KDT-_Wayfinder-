@@ -10,8 +10,8 @@
     python run_pipeline.py --dry-run          # DB 적재 없이 임베딩까지만 검증
 
 사전 조건:
-    - data-pipeline/.env 에 UPSTAGE_API_KEY·SEOUL_JOB_API_KEY·GG_JOBA_API_KEY·
-      HRDNET_API_KEY·DATABASE_URL 설정
+    - data-pipeline/.env 에 SEOUL_JOB_API_KEY·GG_JOBA_API_KEY·HRDNET_API_KEY·
+      DATABASE_URL 설정 (임베딩은 로컬 bge-m3 — 키 불필요)
     - DB 적재 시: docker compose up -d (프로젝트 루트) 로 PostgreSQL 실행 중이어야 함
 """
 import argparse

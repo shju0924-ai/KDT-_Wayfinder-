@@ -14,7 +14,7 @@ from app.core.config import settings
 from app.schemas.career import JobSearchTrack, SkillItem
 
 # 2026-09-18: LLM 호출을 OpenAI(gpt-5.6-luna)에서 Anthropic Claude로 전환.
-# 임베딩(app/services/embedding.py)은 Upstage 그대로 유지 — Anthropic은 임베딩 API를 제공하지 않음.
+# 임베딩(app/services/embedding.py)은 로컬 모델 BAAI/bge-m3 사용 — Anthropic은 임베딩 API를 제공하지 않음.
 MODEL = "claude-opus-5"
 MAX_TOKENS = 16000
 

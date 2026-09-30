@@ -1,4 +1,4 @@
-"""채용공고 임베딩 → pgvector 적재 (서울 일자리포털 + 경기 잡아바).
+"""채용공고 임베딩 → pgvector 적재 (서울 일자리포털[서울·경기·인천] + 경기 잡아바).
 
 흐름: data/processed/jobs_seoul.csv, jobs_gg.csv 로드
       → 직무 텍스트 구성 → (긴 텍스트만) 청킹 → passage 임베딩 → job_postings upsert
@@ -10,13 +10,16 @@
     python -m embedding.embed_jobs             # 전체 실행
     python -m embedding.embed_jobs --limit 20  # 소량 테스트
     python -m embedding.embed_jobs --dry-run   # DB 적재 없이 임베딩까지만 검증
+    python -m embedding.embed_jobs --fresh     # 테이블 비우고 전량 재적재 (마감 공고 제거)
+
+--fresh 없이 실행하면 이미 같은 텍스트로 적재된 공고는 건너뛰고 신규·변경분만 임베딩한다
+— 중간에 끊겨도 다시 실행하면 이어서 채워진다.
 """
 import argparse
 import hashlib
 import os
 
 import pandas as pd
-from tqdm import tqdm
 
 from embedding.common import (
     chunk_text,
@@ -63,7 +66,12 @@ def _read_csv_safe(path: str) -> pd.DataFrame | None:
         return None
 
 
+# 서울 일자리포털 REGION("서울 강동구", "경기도 수원시" 등) 첫 단어 → region 코드
+_SEOUL_PORTAL_REGIONS = {"서울": "seoul", "경기": "gg", "경기도": "gg", "인천": "incheon"}
+
+
 def load_seoul() -> list[dict]:
+    """서울 일자리포털(OA-23047 recMntList) 공고. 서울 외 경기·인천 공고도 포함돼 있다."""
     path = os.path.join(PROCESSED_DIR, "jobs_seoul.csv")
     if not os.path.exists(path):
         print("jobs_seoul.csv 없음 — 건너뜀 (collectors.seoul_job 먼저 실행)")
@@ -72,22 +80,33 @@ def load_seoul() -> list[dict]:
     if df is None:
         return []
     rows = []
+    skipped_region = 0
     for _, r in df.iterrows():
-        text = _join([r.get("JOBCODE_NM"), r.get("JO_SJ"), r.get("DTY_CN"), r.get("GUI_LN"), r.get("BSNS_SUMRY_CN")])
+        region = _SEOUL_PORTAL_REGIONS.get((_clean(r.get("REGION")) or "").split(" ")[0])
+        if region is None:
+            skipped_region += 1
+            continue
+        # 직종명의 "(026505)" 같은 코드 꼬리는 사람이 읽는 제목에서 뗀다
+        jobs_nm = (_clean(r.get("JOBS_NM")) or "").split("(")[0].strip()
+        text = _join([
+            r.get("TITLE"), jobs_nm, r.get("JOB_CONT"), r.get("CAREER"), r.get("MAJOR"),
+            r.get("CERTIFICATE"), r.get("COMP_ABL"), r.get("PF_COND"), r.get("IND_TP_CD_NM"),
+        ])
         if not text:
             continue
-        auth_no = _first(r.get("JO_REGIST_NO"), r.get("JO_REQST_NO"))
+        # 새 API 응답에는 공고 고유번호도 상세 URL도 없어 핵심 필드 해시로 안정적 ID 생성
+        key = "|".join(_clean(r.get(c)) or "" for c in ("COMPANY", "TITLE", "REG_DT", "CORP_ADDR", "JOBS_CD"))
+        uid = hashlib.md5(key.encode()).hexdigest()[:16]
         rows.append({
-            "source_id": f"seoul:{auth_no}",
-            "job_title": _first(r.get("JOBCODE_NM"), r.get("JO_SJ"))[:300],
-            "company": (_clean(r.get("CMPNY_NM")) or "")[:200] or None,
-            "region": "seoul",
-            "source_url": (
-                "https://job.seoul.go.kr/hmpg/rmim/ramg/ramgDetail.do"
-                f"?wantedAuthNo={auth_no}"
-            ) if auth_no else None,
+            "source_id": f"seoul:{uid}",
+            "job_title": _first(jobs_nm, r.get("TITLE"))[:300],
+            "company": (_clean(r.get("COMPANY")) or "")[:200] or None,
+            "region": region,
+            "source_url": None,
             "required_skills_text": text,
         })
+    if skipped_region:
+        print(f"서울 일자리포털: 서울·경기·인천 외 지역 {skipped_region}건 제외")
     return rows
 
 
@@ -120,8 +139,15 @@ def load_gg() -> list[dict]:
     return rows
 
 
+# 임베딩·적재를 나눠 수행하는 단위(행)
+LOAD_CHUNK = 1000
+
+
 def run(limit: int | None = None, dry_run: bool = False, fresh: bool = False) -> None:
     rows = load_seoul() + load_gg()
+    # 수집 CSV에 같은 공고가 페이지 중복으로 여러 번 들어오는 경우가 있어(경기 7.2만 행 중 고유 6.7천 건)
+    # source_id 기준으로 한 번만 임베딩·적재한다 — 어차피 upsert로 마지막 행만 남는다
+    rows = list({r["source_id"]: r for r in rows}.values())
     if limit:
         rows = rows[:limit]
     if not rows:
@@ -138,15 +164,10 @@ def run(limit: int | None = None, dry_run: bool = False, fresh: bool = False) ->
             for i, chunk in enumerate(chunks, start=1):
                 expanded.append({**row, "source_id": f"{row['source_id']}#c{i}", "required_skills_text": chunk})
 
-    print(f"채용공고 {len(rows)}건 → 청킹 후 {len(expanded)}행, 임베딩 시작")
-    texts = [r["required_skills_text"] for r in expanded]
-    vectors = []
-    for i in tqdm(range(0, len(texts), 64), desc="임베딩"):
-        vectors.extend(embed_passages(texts[i : i + 64]))
-    for row, vec in zip(expanded, vectors):
-        row["embedding"] = vec
+    print(f"채용공고 {len(rows)}건 → 청킹 후 {len(expanded)}행")
 
     if dry_run:
+        vectors = embed_passages([r["required_skills_text"] for r in expanded])
         print(f"[dry-run] 임베딩 {len(vectors)}건 완료 (차원 {len(vectors[0])}) — DB 적재 생략")
         return
 
@@ -156,7 +177,25 @@ def run(limit: int | None = None, dry_run: bool = False, fresh: bool = False) ->
         if fresh:
             truncate_table(conn, "job_postings")
             print("job_postings 테이블 비움 (만료 공고 제거)")
-        n = upsert_job_postings(conn, expanded)
+        else:
+            # 같은 source_id·같은 텍스트로 이미 적재된 행은 다시 임베딩하지 않는다
+            existing = dict(conn.execute(
+                "SELECT source_id, required_skills_text FROM job_postings WHERE embedding IS NOT NULL"
+            ).fetchall())
+            before = len(expanded)
+            expanded = [r for r in expanded if existing.get(r["source_id"]) != r["required_skills_text"]]
+            print(f"기존 적재분 {before - len(expanded)}행 건너뜀")
+
+        print(f"임베딩·적재 대상 {len(expanded)}행")
+        # CPU 임베딩은 수십 분 걸리므로 구간마다 바로 적재·커밋한다
+        # — 중간에 중단돼도 그때까지 처리한 분량은 DB에 남는다
+        n = 0
+        for i in range(0, len(expanded), LOAD_CHUNK):
+            part = expanded[i : i + LOAD_CHUNK]
+            for row, vec in zip(part, embed_passages([r["required_skills_text"] for r in part])):
+                row["embedding"] = vec
+            n += upsert_job_postings(conn, part)
+            print(f"job_postings 적재 진행 {n}/{len(expanded)}행", flush=True)
         print(f"job_postings 테이블에 {n}행 적재 완료")
     finally:
         conn.close()

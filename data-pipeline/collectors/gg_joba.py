@@ -30,9 +30,17 @@ PAGE_SIZE = 1000  # API 자체 한도(요청당 최대 1,000건)
 
 def _fetch_page(page_index: int) -> dict:
     params = {"KEY": API_KEY, "Type": "json", "pIndex": page_index, "pSize": PAGE_SIZE}
-    r = httpx.get(BASE_URL, params=params, timeout=30)
-    r.raise_for_status()
-    return r.json()
+    # 전량 수집은 수백 페이지라 일시적 연결 오류(TLS 핸드셰이크 타임아웃 등) 한 번에
+    # 전체가 중단되지 않도록 재시도한다
+    for attempt in range(4):
+        try:
+            r = httpx.get(BASE_URL, params=params, timeout=30)
+            r.raise_for_status()
+            return r.json()
+        except (httpx.TransportError, httpx.HTTPStatusError):
+            if attempt == 3:
+                raise
+            time.sleep(2 ** (attempt + 1))
 
 
 def _total_count() -> int | None:
@@ -81,10 +89,11 @@ def collect(max_pages: int | None = None, drop_closed: bool = True) -> None:
     else:
         kept = all_rows
 
-    df = pd.DataFrame(kept)
+    # API가 같은 공고를 여러 페이지에 반복해서 돌려준다(전체의 약 90%가 완전 중복 행) — 제거 후 저장
+    df = pd.DataFrame(kept).drop_duplicates()
     df.to_csv(os.path.join(PROCESSED_DIR, "jobs_gg.csv"), index=False, encoding="utf-8-sig")
     print(
-        f"경기도 잡아바 채용정보 수집 {total_rows}건 중 마감 제외 후 {len(df)}건 저장 "
+        f"경기도 잡아바 채용정보 수집 {total_rows}건 중 마감·중복 제외 후 {len(df)}건 저장 "
         f"(기준일 {ref}) → data/processed/jobs_gg.csv"
     )
 

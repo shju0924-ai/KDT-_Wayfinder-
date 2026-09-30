@@ -44,9 +44,16 @@ def _fetch_page(page_num: int, start_date: str, end_date: str) -> dict:
         "srchTraStDt": start_date,
         "srchTraEndDt": end_date,
     }
-    r = httpx.get(LIST_URL, params=params, timeout=30)
-    r.raise_for_status()
-    return r.json()
+    # 전량 수집 중 일시적 연결 오류 한 번에 전체가 중단되지 않도록 재시도한다
+    for attempt in range(4):
+        try:
+            r = httpx.get(LIST_URL, params=params, timeout=30)
+            r.raise_for_status()
+            return r.json()
+        except (httpx.TransportError, httpx.HTTPStatusError):
+            if attempt == 3:
+                raise
+            time.sleep(2 ** (attempt + 1))
 
 
 def _dedupe_by_course(rows: list[dict]) -> list[dict]:

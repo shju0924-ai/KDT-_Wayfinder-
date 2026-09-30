@@ -10,6 +10,8 @@ python-multipart>=0.0.12
 pypdf>=5.0,<7
 python-docx>=1.1,<2
 olefile>=0.47,<1
-openai>=1.55
+# 로컬 임베딩(BAAI/bge-m3). GPU 없는 환경은 torch CPU 빌드 권장:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+sentence-transformers>=3.0
 anthropic>=1.6
 pytest>=8.3

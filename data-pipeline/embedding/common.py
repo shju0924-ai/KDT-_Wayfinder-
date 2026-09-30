@@ -1,35 +1,35 @@
-"""임베딩 파이프라인 공용 모듈 — Upstage 클라이언트·청킹·pgvector 적재 헬퍼.
+"""임베딩 파이프라인 공용 모듈 — 로컬 임베딩 모델(bge-m3)·청킹·pgvector 적재 헬퍼.
 
 주의: 테이블 DDL은 backend/app/db/models.py 와 항상 일치시킬 것
      (적재는 여기서 raw SQL로, 조회는 backend가 SQLAlchemy 모델로 수행).
 """
 import os
 
-import httpx
 import psycopg
 from dotenv import load_dotenv
 from pgvector.psycopg import register_vector
 
 load_dotenv()
 
-# ── 임베딩 (Upstage Solar Embedding 2) ──────────────────────
-# 검색 "대상" 문서이므로 반드시 passage 모델 사용 (검색어는 query 모델 — backend 담당)
-PASSAGE_MODEL = "solar-embedding-2-passage"
+# ── 임베딩 (로컬 BAAI/bge-m3, 1024차원) ──────────────────────
+# 모델·차원은 backend/app/services/embedding.py 와 반드시 일치해야 함
+# (bge-m3는 query/passage 프리픽스 구분이 없어 backend 검색어도 같은 방식으로 임베딩)
+# API 키 불필요. 첫 실행 시 모델(약 2GB)을 Hugging Face에서 내려받아 캐시한다.
+EMBEDDING_MODEL = "BAAI/bge-m3"
 EMBEDDING_DIM = 1024  # backend/app/services/embedding.py 와 일치해야 함
-EMBED_URL = "https://api.upstage.ai/v1/embeddings"
-
-# API 한도: 요청당 최대 100건 · 204,800토큰. 여유를 두고 배치 크기 64 사용.
-BATCH_SIZE = 64
-# 대량 임베딩 시 rate limit(429) 회피용 배치 간 최소 간격(초). 429가 나면 아래
-# 백오프가 추가로 개입한다.
-INTER_BATCH_SLEEP = float(os.getenv("EMBED_INTER_BATCH_SLEEP", "0.3"))
+# 입력 토큰 상한. bge-m3는 최대 8,192토큰까지 받지만 CPU에서는 길이에 비례해 느려지므로
+# 512로 제한하고, 그보다 긴 텍스트는 아래 청킹으로 나눠 잘림을 막는다.
+# backend/app/services/embedding.py 의 EMBED_MAX_SEQ_LENGTH 와 일치시킬 것.
+EMBED_MAX_SEQ_LENGTH = 512
+BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "16"))
 
 # ── 청킹 정책 ───────────────────────────────────────────────
-# Solar Embedding 2는 8k 토큰 컨텍스트라 채용공고·훈련과정 텍스트(수백 자 수준)는
-# 대부분 청킹이 불필요. 예외적으로 긴 텍스트(모집요강 전문 등)만 문자 기준으로 분할한다.
+# 채용공고·훈련과정 텍스트(수백 자 수준)는 대부분 청킹이 불필요. 예외적으로 긴 텍스트
+# (모집요강 전문 등)만 문자 기준으로 분할한다. 한국어는 bge-m3 토크나이저 기준 대략
+# 1~1.5자당 1토큰이라 500자면 512토큰 안에 들어간다.
 # 청크는 source_id 에 "#c1", "#c2" 접미어를 붙여 별도 행으로 저장 → 검색 시 원문 단위로 묶어 해석.
-CHUNK_MAX_CHARS = 3000
-CHUNK_OVERLAP = 200
+CHUNK_MAX_CHARS = 500
+CHUNK_OVERLAP = 50
 
 
 def chunk_text(text: str, max_chars: int = CHUNK_MAX_CHARS, overlap: int = CHUNK_OVERLAP) -> list[str]:
@@ -45,63 +45,33 @@ def chunk_text(text: str, max_chars: int = CHUNK_MAX_CHARS, overlap: int = CHUNK
     return chunks
 
 
-def embed_passages(texts: list[str], api_key: str | None = None) -> list[list[float]]:
-    """텍스트 목록 → passage 임베딩 (배치 자동 분할)."""
-    key = api_key or os.getenv("UPSTAGE_API_KEY", "")
-    if not key:
-        raise RuntimeError("UPSTAGE_API_KEY 가 .env 에 설정되어 있지 않습니다.")
-
-    import time
-
-    vectors: list[list[float]] = []
-    with httpx.Client(timeout=60) as client:
-        for n, i in enumerate(range(0, len(texts), BATCH_SIZE)):
-            batch = texts[i : i + BATCH_SIZE]
-            data = _embed_batch_with_retry(client, key, batch)
-            # 응답 JSON에 정수(0)와 실수가 섞여 오는 경우가 있어 psycopg가 벡터를
-            # 거부함(cannot dump lists of mixed types) — 삽입 전 float로 통일
-            vectors.extend([float(x) for x in d["embedding"]] for d in data)
-            if n:  # 대량 임베딩 시 Upstage rate limit(429) 선제 회피용 페이싱
-                time.sleep(INTER_BATCH_SLEEP)
-    return vectors
+_model = None
 
 
-# 대량 임베딩 시 Upstage가 429(Too Many Requests)를 내므로 지수 백오프로 재시도한다.
-# Retry-After 헤더가 오면 그 값을 우선 존중.
-MAX_RETRIES = 6
+def get_model():
+    """모델은 무거워 프로세스당 한 번만 로드한다."""
+    global _model
+    if _model is None:
+        from sentence_transformers import SentenceTransformer
+
+        _model = SentenceTransformer(EMBEDDING_MODEL)
+        _model.max_seq_length = EMBED_MAX_SEQ_LENGTH
+    return _model
 
 
-def _embed_batch_with_retry(client: httpx.Client, key: str, batch: list[str]) -> list[dict]:
-    import time
+def embed_passages(texts: list[str]) -> list[list[float]]:
+    """텍스트 목록 → passage 임베딩 (정규화, 배치는 모델이 내부 분할).
 
-    delay = 2.0
-    last_exc: Exception | None = None
-    for attempt in range(MAX_RETRIES):
-        try:
-            r = client.post(
-                EMBED_URL,
-                headers={"Authorization": f"Bearer {key}"},
-                json={"model": PASSAGE_MODEL, "input": batch},
-            )
-        except httpx.TransportError as exc:
-            # 연결 자체가 끊기는 경우(예: "Server disconnected without sending a
-            # response")는 응답 객체가 없어 상태 코드로 못 걸러내므로 별도 처리.
-            time.sleep(delay)
-            delay = min(delay * 2, 60)
-            last_exc = exc
-            continue
-        if r.status_code == 429 or r.status_code >= 500:
-            retry_after = r.headers.get("Retry-After")
-            wait = float(retry_after) if retry_after and retry_after.isdigit() else delay
-            time.sleep(wait)
-            delay = min(delay * 2, 60)
-            last_exc = httpx.HTTPStatusError(
-                f"{r.status_code} 재시도 {attempt + 1}/{MAX_RETRIES}", request=r.request, response=r
-            )
-            continue
-        r.raise_for_status()
-        return sorted(r.json()["data"], key=lambda d: d["index"])
-    raise RuntimeError(f"임베딩 재시도 {MAX_RETRIES}회 초과") from last_exc
+    CPU 임베딩은 느리므로 같은 텍스트는 한 번만 계산해 결과를 재사용한다
+    (채용공고는 제목·조건이 같은 공고가 많아 고유 텍스트가 원문 행보다 훨씬 적다).
+    """
+    unique = list(dict.fromkeys(texts))
+    vecs = get_model().encode(
+        unique, batch_size=BATCH_SIZE, normalize_embeddings=True, show_progress_bar=len(unique) > BATCH_SIZE
+    )
+    # psycopg 벡터 삽입 전 파이썬 float로 통일
+    by_text = {t: [float(x) for x in v] for t, v in zip(unique, vecs)}
+    return [by_text[t] for t in texts]
 
 
 # ── DB (PostgreSQL + pgvector) ─────────────────────────────

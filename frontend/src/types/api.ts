@@ -51,7 +51,7 @@ export interface JobMatch {
   posting_count: number;
   job_title: string;
   company?: string | null;
-  region?: "seoul" | "gg" | null;
+  region?: "seoul" | "gg" | "incheon" | null;
   source_url?: string | null;
   /** 요구역량 판단 근거가 된 공고 발췌 */
   requirement_excerpt?: string | null;

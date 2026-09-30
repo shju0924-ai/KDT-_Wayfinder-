@@ -25,7 +25,7 @@ class Base(DeclarativeBase):
 
 
 class JobPosting(Base):
-    """채용 공고 (서울 일자리포털 + 경기 잡아바 수집분) — STEP 3 인접 직무 탐색 대상."""
+    """채용 공고 (서울 일자리포털[서울·경기·인천] + 경기 잡아바 수집분) — STEP 3 인접 직무 탐색 대상."""
 
     __tablename__ = "job_postings"
 
@@ -33,7 +33,7 @@ class JobPosting(Base):
     source_id: Mapped[str] = mapped_column(String(80), unique=True, comment="원천 데이터 ID (seoul:/gg: 접두어)")
     job_title: Mapped[str] = mapped_column(String(300), index=True)
     company: Mapped[str | None] = mapped_column(String(200), nullable=True)
-    region: Mapped[str | None] = mapped_column(String(20), index=True, comment="seoul | gg")
+    region: Mapped[str | None] = mapped_column(String(20), index=True, comment="seoul | gg | incheon")
     source_url: Mapped[str | None] = mapped_column(String(1000), nullable=True, comment="원본 채용공고 상세 URL")
     required_skills_text: Mapped[str] = mapped_column(Text, comment="요구역량 서술 (임베딩 입력)")
     deadline: Mapped[str | None] = mapped_column(

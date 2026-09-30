@@ -31,7 +31,7 @@ def _fetch_page(client: httpx.Client, page_no: int) -> dict:
     response = client.get(
         API_URL,
         params={
-            "ServiceKey": API_KEY,
+            "serviceKey": API_KEY,
             "type": "json",
             "pageNo": page_no,
             "numOfRows": PAGE_SIZE,

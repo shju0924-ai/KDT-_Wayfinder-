@@ -12,12 +12,8 @@ class Settings(BaseSettings):
     app_env: str = "dev"
     database_url: str = "postgresql+psycopg://wayfinder:wayfinder@localhost:5432/wayfinder"
 
-    # LLM(Anthropic Claude)·임베딩(Upstage — 임베딩은 Anthropic이 제공하지 않아 그대로 유지)
+    # LLM(Anthropic Claude). 임베딩은 로컬 모델(BAAI/bge-m3)이라 키가 필요 없음
     anthropic_api_key: str = ""
-    upstage_api_key: str = ""
-    # 2026-09-18 이후 미사용(OpenAI에서 Anthropic으로 전환) — 남아있는 .env 값과의
-    # 호환을 위해 필드는 유지하되 코드에서 참조하지 않음.
-    openai_api_key: str = ""
 
     # 공공데이터
     work24_api_key: str = ""

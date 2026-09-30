@@ -14,7 +14,6 @@ import argparse
 import os
 
 import pandas as pd
-from tqdm import tqdm
 
 from embedding.common import (
     chunk_text,
@@ -80,6 +79,10 @@ def load_courses() -> list[dict]:
     return rows
 
 
+# 임베딩·적재를 나눠 수행하는 단위(행)
+LOAD_CHUNK = 1000
+
+
 def run(limit: int | None = None, dry_run: bool = False, fresh: bool = False) -> None:
     rows = load_courses()
     if limit:
@@ -98,14 +101,9 @@ def run(limit: int | None = None, dry_run: bool = False, fresh: bool = False) ->
                 expanded.append({**row, "source_id": f"{row['source_id']}#c{i}", "content_text": chunk})
 
     print(f"훈련과정 {len(rows)}건 → 청킹 후 {len(expanded)}행, 임베딩 시작")
-    texts = [r["content_text"] for r in expanded]
-    vectors = []
-    for i in tqdm(range(0, len(texts), 64), desc="임베딩"):
-        vectors.extend(embed_passages(texts[i : i + 64]))
-    for row, vec in zip(expanded, vectors):
-        row["embedding"] = vec
 
     if dry_run:
+        vectors = embed_passages([r["content_text"] for r in expanded])
         print(f"[dry-run] 임베딩 {len(vectors)}건 완료 (차원 {len(vectors[0])}) — DB 적재 생략")
         return
 
@@ -115,7 +113,15 @@ def run(limit: int | None = None, dry_run: bool = False, fresh: bool = False) ->
         if fresh:
             truncate_table(conn, "training_courses")
             print("training_courses 테이블 비움 (만료·개강 과정 제거)")
-        n = upsert_training_courses(conn, expanded)
+        # CPU 임베딩은 수십 분 걸리므로 구간마다 바로 적재·커밋한다
+        # — 중간에 중단돼도 그때까지 처리한 분량은 DB에 남는다
+        n = 0
+        for i in range(0, len(expanded), LOAD_CHUNK):
+            part = expanded[i : i + LOAD_CHUNK]
+            for row, vec in zip(part, embed_passages([r["content_text"] for r in part])):
+                row["embedding"] = vec
+            n += upsert_training_courses(conn, part)
+            print(f"training_courses 적재 진행 {n}/{len(expanded)}행")
         print(f"training_courses 테이블에 {n}행 적재 완료")
     finally:
         conn.close()

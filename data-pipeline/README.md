@@ -10,7 +10,7 @@ collectors/  →  data/ (원본·전처리 산출물, git 제외)  →  embeddin
 
 | 소스 | 용도 | API | 상태 |
 |---|---|---|---|
-| 서울시 일자리포털 | 채용공고(서울) → 인접 직무 매핑 | data.seoul.go.kr `GetJobInfo` | ✅ 확인됨 |
+| 서울시 일자리포털 | 채용공고(서울·경기·인천) → 인접 직무 매핑 | data.seoul.go.kr OA-23047 `recMntList` (구 `GetJobInfo`는 2026-09-03 종료) | ✅ 40,517건 수집 확인 (2026-09-29) |
 | 경기도 잡아바 | 채용공고(경기) → 인접 직무 매핑 | data.gg.go.kr `GGJOBABARECRUSTM` | ✅ 확인됨 |
 | HRD-Net | 훈련과정(NCS 코드 포함) → 학습 로드맵 교육 자원 | work24.go.kr `callOpenApiSvcInfo310L01` | ✅ 확인됨 |
 | 고용24 (워크넷) | 채용 공고·직업 정보 | https://openapi.work.go.kr | ❌ 개인회원 이용 불가 확인됨 — 서울·경기로 대체 |
@@ -60,8 +60,8 @@ python -m embedding.backfill_job_urls  # 기존 임베딩은 유지하고 원본
 - **재적재**: 만료돼 이번 수집에서 빠진 행은 upsert로는 남으므로, 열린 공고/과정만 유지하려면
   `--fresh`로 테이블을 비운 뒤 넣는다: `python -m embedding.embed_jobs --fresh`.
 - **런타임 이중 안전장치**: 백엔드 훈련과정 검색은 `end_date >= CURRENT_DATE`로 종료된 과정을 한 번 더 제외한다.
-- 대량 임베딩은 Upstage rate limit(429) 대비로 배치 간 페이싱(`EMBED_INTER_BATCH_SLEEP`, 기본 0.3초)과
-  지수 백오프 재시도가 걸려 있다.
+- 임베딩은 로컬 bge-m3로 수행한다(API 호출·rate limit 없음). GPU가 없으면 CPU로 돌아 수만 건에
+  수 시간이 걸릴 수 있다. 배치 크기는 `EMBED_BATCH_SIZE`(기본 16)로 조정.
 
 ## 적재 테이블 (backend/app/db/models.py 와 동기화)
 
@@ -72,14 +72,14 @@ python -m embedding.backfill_job_urls  # 기존 임베딩은 유지하고 원본
 | `ncs_units` | 한국산업인력공단 NCS | STEP 1 업무 단위 표준화·출처 |
 | `automation_occupation_scores` | Anthropic + ILO/NASK | STEP 1 직업 노출도 보정 |
 
-청킹: 텍스트 3,000자 초과 시에만 200자 오버랩으로 분할되며, 청크 행은
+청킹: 텍스트 500자 초과 시에만 50자 오버랩으로 분할되며(bge-m3 512토큰 상한에 맞춤), 청크 행은
 `source_id`에 `#c1`, `#c2` 접미어가 붙는다 (대부분의 공고·과정은 청킹 불필요).
 
 ## 규칙
 
 - 원본 응답은 `data/raw/`, 전처리 결과는 `data/processed/` 에 저장 (둘 다 git 제외)
 - 임베딩 모델·차원은 `backend/app/services/embedding.py` 와 반드시 일치시킬 것
-  (현재: Upstage `solar-embedding-2-passage`, 1024차원 — 검색 대상은 passage, 검색어는 query 모델)
+  (현재: 로컬 `BAAI/bge-m3`, 1024차원, 입력 512토큰 상한 — 검색 대상·검색어 모두 같은 모델)
 
 ## 자동화 위험도 산식
 

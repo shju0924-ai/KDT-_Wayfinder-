@@ -1,6 +1,12 @@
 // STEP 3 — 인접 직무 탐색 카드. 적합도·수요 전망·전환 난이도 비교 후 목표 직무 선택.
 import type { JobMatch, JobSearchTrack } from "../../types/api";
 
+const REGION_LABELS: Record<NonNullable<JobMatch["region"]>, string> = {
+  seoul: "서울",
+  gg: "경기",
+  incheon: "인천",
+};
+
 interface Props {
   jobs: JobMatch[];
   searchTrack: JobSearchTrack;
@@ -66,7 +72,7 @@ export default function JobMatchList({ jobs, searchTrack, selected, onSelect }: 
               {(job.company || job.region) && (
                 <div className="job-source">
                   실제 공고 · {job.company ?? "회사명 미기재"}
-                  {job.region && ` · ${job.region === "seoul" ? "서울" : "경기"}`}
+                  {job.region && REGION_LABELS[job.region] && ` · ${REGION_LABELS[job.region]}`}
                   {job.posting_count > 1 && ` · 관련 공고 ${job.posting_count}건`}
                   {hasPostingUrl && " · 공고 보기 ↗"}
                 </div>

@@ -26,7 +26,7 @@ Copy-Item .env.example backend\.env
 Copy-Item .env.example data-pipeline\.env
 ```
 
-`backend/.env`에는 최소한 `OPENAI_API_KEY`, `UPSTAGE_API_KEY`를 채웁니다. 공공데이터까지 새로 수집하려면 `data-pipeline/.env`에 아래 키도 넣습니다.
+`backend/.env`에는 최소한 `ANTHROPIC_API_KEY`(LLM)를 채웁니다. 임베딩은 로컬 모델(`BAAI/bge-m3`)이라 키가 필요 없고, 첫 실행 시 모델(약 2GB)을 자동으로 내려받습니다. 공공데이터까지 새로 수집하려면 `data-pipeline/.env`에 아래 키도 넣습니다.
 
 ```dotenv
 NCS_API_KEY=
@@ -71,7 +71,7 @@ npm run dev
 
 ### 5. 데모 데이터를 포함해 4단계 전체를 실행하려면
 
-새 로컬 환경의 DB는 비어 있으므로, STEP 3·4까지 재현하려면 파이프라인을 한 번 실행해야 합니다. 수집 API 키와 Upstage 키가 준비된 뒤 실행합니다.
+새 로컬 환경의 DB는 비어 있으므로, STEP 3·4까지 재현하려면 파이프라인을 한 번 실행해야 합니다. 수집 API 키가 준비된 뒤 실행합니다(임베딩은 로컬 모델이라 키 불필요, GPU가 없으면 수 시간 소요).
 
 ```powershell
 cd data-pipeline
