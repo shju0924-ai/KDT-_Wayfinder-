@@ -1,8 +1,8 @@
 """STEP 3. 다음 직무 탐색 — 두 트랙으로 갈라진다.
 
 인접 직무 전환형(adjacent):
-    확정된 역량 프로필 → query 임베딩 → pgvector 유사 공고 top-k
-    → LLM이 공고별 수요 전망·전환 난이도·기여 역량 판정 → 격차 비율로 인접 후보만 남김.
+    확정된 역량 프로필 → query 임베딩 → pgvector 유사 공고 top-k → 벡터 순위 상위부터
+    TOP_K 건씩 묶어 LLM이 수요 전망·전환 난이도·기여 역량 판정 → 격차 비율로 인접 후보만 남김.
     fit_score 는 역량↔공고 코사인 유사도를 백분율로 환산한 값.
 
 교육 후 직무 전환형(training) — 검색 방향을 뒤집는다:
@@ -26,9 +26,10 @@ from app.services import embedding, llm
 router = APIRouter()
 
 TOP_K = 5
-# 최종 트랙 분류(역량 격차 비율)에서 걸러질 후보를 감안해 선별 단계는 넉넉히 가져온다.
+# 격차 판정에서 걸러질 후보를 감안해 판정 대상은 넉넉히 둔다 — TOP_K 건씩 묶어 최대 2회 호출.
+# 첫 묶음에서 TOP_K 건이 모두 통과하면 두 번째 호출은 하지 않는다(로컬 모델은 호출당 1~2분).
 SELECT_K = TOP_K * 2
-# 후보 선별 전에 현재 직무·중복 직무를 걸러내므로 검색은 더 넉넉히 한다.
+# 판정 전에 현재 직무·중복 직무를 걸러내므로 검색은 더 넉넉히 한다.
 SEARCH_K = TOP_K * 8
 # 역량 격차 비율(missing/required)이 이 값 이하면 인접 직무로 인정한다.
 # 0.4(요구역량 60%+ 보유)는 콜센터 상담원 페르소나 실측 3회 중 2회가 결과 0건이었다 —
@@ -75,7 +76,10 @@ def _gap_ratio(required_skills: list[str], missing_skills: list[str]) -> float:
 
 
 def _is_adjacent_match(judged: dict) -> bool:
-    """인접 직무 전환형 판정 — 격차가 작고(요구역량 대부분 보유) 실제 이어지는 역량이 있어야 한다."""
+    """인접 직무 전환형 판정 — 현재 직무와 다르고, 격차가 작고(요구역량 대부분 보유),
+    실제 이어지는 역량이 있어야 한다. 표기만 다른 같은 직무는 _is_same_job 이 못 잡아 LLM 판정으로 거른다."""
+    if judged.get("same_as_current"):
+        return False
     gap_ratio = _gap_ratio(judged["required_skills"], judged["missing_skills"])
     return gap_ratio <= ADJACENT_GAP_RATIO and len(judged["matched_skills"]) > 0
 
@@ -133,70 +137,45 @@ async def _match_adjacent_transition(
         )
         representatives.append(representative)
 
-    # 넓게 검색한 실제 공고 중 인접 방향에 대체로 맞는 후보를 넉넉히 남긴다.
-    # 최종 인접 판정은 역량 격차 판정(judge_job_match) 이후 비율로 가른다.
-    try:
-        selected_indices = await llm.select_job_candidates(
-            skill_names,
-            exclude_job,
-            representatives,
-            "adjacent_transition",
-            limit=SELECT_K,
-        )
-        # structured output이 파싱되지 않아 빈 목록이 오더라도, 실제 검색된 공고까지
-        # 사라지게 두지 않는다. 이 경우 벡터 검색 순위의 후보를 그대로 제공한다.
-        if selected_indices:
-            representatives = [representatives[index] for index in selected_indices]
-        else:
-            representatives = representatives[:SELECT_K]
-    except Exception:
-        # 선별 호출만 실패한 경우에도 기존 벡터 검색 결과는 제공한다.
-        representatives = representatives[:SELECT_K]
-
-    if not representatives:
-        return []
-
-    # 검색된 직무 그룹별 판정은 서로 독립적이므로 동시에 호출
-    judgements = await asyncio.gather(
-        *(
-            llm.judge_job_match(skill_names, r["job_title"], r["snippet"])
-            for r in representatives
-        ),
-        return_exceptions=True,
-    )
-
+    # 벡터 유사도 순위 상위부터 TOP_K 건씩 묶어 판정하고, 인접 판정(격차 비율)을 통과한 것만 남긴다.
     matches: list[JobMatch] = []
-    for row, judged in zip(representatives, judgements):
-        if isinstance(judged, Exception):  # 한 건 실패가 전체를 막지 않도록
-            judged = {
-                "demand_outlook": "유지",
-                "transition_difficulty": "보통",
-                "matched_skills": [],
-                "required_skills": [],
-                "missing_skills": [],
-            }
-        if not _is_adjacent_match(judged):
-            continue
-        matches.append(
-            JobMatch(
-                posting_id=row.get("posting_id"),
-                posting_count=row["posting_count"],
-                job_title=row["job_title"],
-                company=row.get("company"),
-                region=row.get("region"),
-                source_url=row.get("source_url"),
-                requirement_excerpt=row.get("snippet"),
-                fit_score=round(row["similarity"] * 100, 1),
-                demand_outlook=judged["demand_outlook"],
-                transition_difficulty=judged["transition_difficulty"],
-                matched_skills=judged["matched_skills"],
-                required_skills=judged["required_skills"],
-                missing_skills=judged["missing_skills"],
-            )
-        )
+    candidates = representatives[:SELECT_K]
+    for start in range(0, len(candidates), TOP_K):
         if len(matches) == TOP_K:
             break
+        batch = candidates[start : start + TOP_K]
+        try:
+            judgements = await llm.judge_job_matches(skill_names, exclude_job, batch)
+        except Exception as e:
+            # LLM 자체가 죽은 경우(키 오류·Ollama 미기동 등) '결과 0건'으로 숨기지 않는다
+            if matches:
+                break
+            raise HTTPException(status_code=502, detail=f"직무 판정 실패: {e}") from e
+        for row, judged in zip(batch, judgements):
+            if len(matches) == TOP_K:
+                break
+            if not _is_adjacent_match(judged):
+                continue
+            matches.append(_adjacent_job_match(row, judged))
     return matches
+
+
+def _adjacent_job_match(row: dict, judged: dict) -> JobMatch:
+    return JobMatch(
+        posting_id=row.get("posting_id"),
+        posting_count=row["posting_count"],
+        job_title=row["job_title"],
+        company=row.get("company"),
+        region=row.get("region"),
+        source_url=row.get("source_url"),
+        requirement_excerpt=row.get("snippet"),
+        fit_score=round(row["similarity"] * 100, 1),
+        demand_outlook=judged["demand_outlook"],
+        transition_difficulty=judged["transition_difficulty"],
+        matched_skills=judged["matched_skills"],
+        required_skills=judged["required_skills"],
+        missing_skills=judged["missing_skills"],
+    )
 
 
 async def _match_training_transition(
@@ -225,6 +204,10 @@ async def _match_training_transition(
     verified = await asyncio.gather(
         *(verify(t) for t in targets), return_exceptions=True
     )
+    # 검증 검색이 전부 실패했다면(DB 연결 끊김 등) '결과 0건'으로 숨기지 않는다
+    errors = [r for r in verified if isinstance(r, Exception)]
+    if errors and len(errors) == len(verified):
+        raise HTTPException(status_code=502, detail=f"훈련과정·채용 검증 실패: {errors[0]}")
 
     matches: list[JobMatch] = []
     for result in verified:

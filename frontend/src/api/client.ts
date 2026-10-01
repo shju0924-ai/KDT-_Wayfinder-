@@ -11,8 +11,8 @@ import type {
   SurveyInput,
 } from "../types/api";
 
-// LLM 호출이 포함된 단계는 응답까지 수십 초가 걸릴 수 있어 타임아웃을 넉넉히 둔다.
-const api = axios.create({ baseURL: "/api", timeout: 180_000 });
+// LLM 호출이 포함된 단계는 응답까지 오래 걸린다 — 로컬 모델(Ollama, CPU)은 단계당 수 분.
+const api = axios.create({ baseURL: "/api", timeout: 600_000 });
 
 // 경력 입력 — 이력서 파일 파싱
 export const parseResumeFile = (file: File) => {

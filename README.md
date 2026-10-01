@@ -26,7 +26,7 @@ Copy-Item .env.example backend\.env
 Copy-Item .env.example data-pipeline\.env
 ```
 
-`backend/.env`에는 최소한 `ANTHROPIC_API_KEY`(LLM)를 채웁니다. 임베딩은 로컬 모델(`BAAI/bge-m3`)이라 키가 필요 없고, 첫 실행 시 모델(약 2GB)을 자동으로 내려받습니다. 공공데이터까지 새로 수집하려면 `data-pipeline/.env`에 아래 키도 넣습니다.
+`backend/.env`에는 LLM 설정을 채웁니다 — `LLM_PROVIDER=claude`면 `ANTHROPIC_API_KEY`, `LLM_PROVIDER=ollama`면 키 없이 로컬 모델([Ollama](https://ollama.com) 설치 후 `ollama pull qwen3.5:4b`)을 씁니다. 로컬 모델은 GPU 없는 PC에서 단계당 1~4분 걸립니다. 임베딩은 로컬 모델(`BAAI/bge-m3`)이라 키가 필요 없고, 첫 실행 시 모델(약 2GB)을 자동으로 내려받습니다. 공공데이터까지 새로 수집하려면 `data-pipeline/.env`에 아래 키도 넣습니다.
 
 ```dotenv
 NCS_API_KEY=
