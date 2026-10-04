@@ -16,6 +16,9 @@ load_dotenv()
 # (bge-m3는 query/passage 프리픽스 구분이 없어 backend 검색어도 같은 방식으로 임베딩)
 # API 키 불필요. 첫 실행 시 모델(약 2GB)을 Hugging Face에서 내려받아 캐시한다.
 EMBEDDING_MODEL = "BAAI/bge-m3"
+# 로컬 캐시(D:\hf-cache 등)의 refs/main 과 같은 커밋 — GPU 서버(RunPod)에서 받을 때도
+# 동일 가중치를 쓰도록 고정한다
+EMBEDDING_REVISION = "5617a9f61b028005a4858fdac845db406aefb181"
 EMBEDDING_DIM = 1024  # backend/app/services/embedding.py 와 일치해야 함
 # 입력 토큰 상한. bge-m3는 최대 8,192토큰까지 받지만 CPU에서는 길이에 비례해 느려지므로
 # 512로 제한하고, 그보다 긴 텍스트는 아래 청킹으로 나눠 잘림을 막는다.
@@ -54,9 +57,38 @@ def get_model():
     if _model is None:
         from sentence_transformers import SentenceTransformer
 
-        _model = SentenceTransformer(EMBEDDING_MODEL)
+        _model = SentenceTransformer(EMBEDDING_MODEL, revision=EMBEDDING_REVISION)
         _model.max_seq_length = EMBED_MAX_SEQ_LENGTH
     return _model
+
+
+# ── 사전 계산 벡터 캐시 ─────────────────────────────────────
+# CPU 임베딩이 너무 느려 GPU 서버에서 export_vectors.py 로 벡터만 계산해 온 경우,
+# EMBED_CACHE=<npz 경로> 를 지정하면 캐시에 있는 텍스트는 모델을 돌리지 않고 재사용한다.
+# (캐시에 없는 텍스트만 로컬 모델로 계산)
+_cache: dict[str, list[float]] | None = None
+
+
+def save_vector_cache(path: str, texts: list[str], vecs) -> None:
+    import numpy as np
+
+    np.savez_compressed(path, texts=np.array(texts, dtype=object), vecs=np.asarray(vecs, dtype=np.float32))
+
+
+def _get_cache() -> dict[str, list[float]]:
+    global _cache
+    if _cache is None:
+        _cache = {}
+        path = os.getenv("EMBED_CACHE")
+        if path:
+            import numpy as np
+
+            data = np.load(path, allow_pickle=True)  # 우리가 만든 파일만 지정할 것
+            if data["vecs"].shape[1] != EMBEDDING_DIM:
+                raise ValueError(f"캐시 차원 {data['vecs'].shape[1]} ≠ {EMBEDDING_DIM}")
+            _cache = {t: [float(x) for x in v] for t, v in zip(data["texts"], data["vecs"])}
+            print(f"벡터 캐시 {len(_cache)}건 로드: {path}")
+    return _cache
 
 
 def embed_passages(texts: list[str]) -> list[list[float]]:
@@ -65,12 +97,16 @@ def embed_passages(texts: list[str]) -> list[list[float]]:
     CPU 임베딩은 느리므로 같은 텍스트는 한 번만 계산해 결과를 재사용한다
     (채용공고는 제목·조건이 같은 공고가 많아 고유 텍스트가 원문 행보다 훨씬 적다).
     """
+    cache = _get_cache()
     unique = list(dict.fromkeys(texts))
-    vecs = get_model().encode(
-        unique, batch_size=BATCH_SIZE, normalize_embeddings=True, show_progress_bar=len(unique) > BATCH_SIZE
-    )
-    # psycopg 벡터 삽입 전 파이썬 float로 통일
-    by_text = {t: [float(x) for x in v] for t, v in zip(unique, vecs)}
+    missing = [t for t in unique if t not in cache]
+    by_text = {t: cache[t] for t in unique if t in cache}
+    if missing:
+        vecs = get_model().encode(
+            missing, batch_size=BATCH_SIZE, normalize_embeddings=True, show_progress_bar=len(missing) > BATCH_SIZE
+        )
+        # psycopg 벡터 삽입 전 파이썬 float로 통일
+        by_text.update({t: [float(x) for x in v] for t, v in zip(missing, vecs)})
     return [by_text[t] for t in texts]
 
 
@@ -168,7 +204,40 @@ def get_connection() -> psycopg.Connection:
 
 def ensure_tables(conn: psycopg.Connection) -> None:
     with conn.cursor() as cur:
+        # DDL 의 HNSW 인덱스가 없을 때 새로 빌드될 수 있어 create_vector_index 와 같은 이유로 병렬 빌드 끔
+        cur.execute("SET max_parallel_maintenance_workers = 0;")
         cur.execute(DDL)
+    conn.commit()
+
+
+# HNSW 인덱스가 shared_buffers 보다 커지면 행마다 디스크 랜덤 읽기가 생겨 삽입이
+# 사실상 멈춘다(2만 행·인덱스 159MB에서 확인). 대량 적재 때는 인덱스를 빼고 넣은 뒤
+# 한 번에 다시 만든다. 이름·정의는 위 DDL 과 동일하게 유지할 것.
+VECTOR_INDEXES = {
+    "job_postings": "idx_job_postings_embedding_cos",
+    "training_courses": "idx_training_courses_embedding_cos",
+}
+BULK_LOAD_THRESHOLD = 5000  # 이보다 적게 넣을 때는 인덱스 재생성 비용이 더 크다
+
+
+def drop_vector_index(conn: psycopg.Connection, table: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(f"DROP INDEX IF EXISTS {VECTOR_INDEXES[table]};")
+    conn.commit()
+
+
+def create_vector_index(conn: psycopg.Connection, table: str) -> None:
+    print(f"{table} 벡터 인덱스(HNSW) 생성 중…", flush=True)
+    with conn.cursor() as cur:
+        # WSL 메모리 2GB 환경에서 512MB는 DB 프로세스가 죽었다 — 그래프가 넘치면 느려질 뿐 실패하지 않음
+        cur.execute("SET maintenance_work_mem = '256MB';")
+        # 병렬 빌드는 maintenance_work_mem 만큼 /dev/shm 을 잡는데 Docker 기본 shm 은 64MB라
+        # DiskFull 로 실패한다 → 단일 프로세스로 빌드(백엔드 로컬 메모리 사용)
+        cur.execute("SET max_parallel_maintenance_workers = 0;")
+        cur.execute(
+            f"CREATE INDEX IF NOT EXISTS {VECTOR_INDEXES[table]} "
+            f"ON {table} USING hnsw (embedding vector_cosine_ops);"
+        )
     conn.commit()
 
 

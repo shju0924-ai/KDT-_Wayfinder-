@@ -8,11 +8,20 @@ services:
       POSTGRES_DB: wayfinder
     ports:
       - "5432:5432"
+    # 기본 64MB 는 HNSW 인덱스 병렬 빌드 시 DiskFull 로 실패한다
+    shm_size: 256mb
     volumes:
-      - ./pgdata:/var/lib/postgresql/data
+      # PGDATA 는 Windows 드라이브 바인드 마운트(./pgdata)가 아닌 Docker 볼륨에 둔다 —
+      # 바인드 마운트에서는 대량 적재 중 체크포인트 시점에 서버 프로세스가 죽고
+      # 크래시 복구에 10분 넘게 걸리는 문제가 반복됐다
+      - wayfinder-pgdata:/var/lib/postgresql/data
       - ./db/init:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U wayfinder"]
       interval: 5s
       timeout: 3s
       retries: 5
+
+volumes:
+  wayfinder-pgdata:
+    name: wayfinder-pgdata

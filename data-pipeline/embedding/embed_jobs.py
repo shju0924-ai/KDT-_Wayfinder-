@@ -22,7 +22,10 @@ import os
 import pandas as pd
 
 from embedding.common import (
+    BULK_LOAD_THRESHOLD,
     chunk_text,
+    create_vector_index,
+    drop_vector_index,
     embed_passages,
     ensure_tables,
     get_connection,
@@ -143,16 +146,14 @@ def load_gg() -> list[dict]:
 LOAD_CHUNK = 1000
 
 
-def run(limit: int | None = None, dry_run: bool = False, fresh: bool = False) -> None:
+def prepare(limit: int | None = None) -> list[dict]:
+    """CSV 로드 → 중복 제거 → 청킹까지 마친 적재 대상 행 (export_vectors.py 와 공유)."""
     rows = load_seoul() + load_gg()
     # 수집 CSV에 같은 공고가 페이지 중복으로 여러 번 들어오는 경우가 있어(경기 7.2만 행 중 고유 6.7천 건)
     # source_id 기준으로 한 번만 임베딩·적재한다 — 어차피 upsert로 마지막 행만 남는다
     rows = list({r["source_id"]: r for r in rows}.values())
     if limit:
         rows = rows[:limit]
-    if not rows:
-        print("적재할 채용공고가 없습니다.")
-        return
 
     # 청킹 — 긴 텍스트만 분할되며 청크는 source_id 접미어(#c1…)로 별도 행이 된다
     expanded: list[dict] = []
@@ -165,6 +166,14 @@ def run(limit: int | None = None, dry_run: bool = False, fresh: bool = False) ->
                 expanded.append({**row, "source_id": f"{row['source_id']}#c{i}", "required_skills_text": chunk})
 
     print(f"채용공고 {len(rows)}건 → 청킹 후 {len(expanded)}행")
+    return expanded
+
+
+def run(limit: int | None = None, dry_run: bool = False, fresh: bool = False) -> None:
+    expanded = prepare(limit)
+    if not expanded:
+        print("적재할 채용공고가 없습니다.")
+        return
 
     if dry_run:
         vectors = embed_passages([r["required_skills_text"] for r in expanded])
@@ -187,6 +196,9 @@ def run(limit: int | None = None, dry_run: bool = False, fresh: bool = False) ->
             print(f"기존 적재분 {before - len(expanded)}행 건너뜀")
 
         print(f"임베딩·적재 대상 {len(expanded)}행")
+        bulk = len(expanded) >= BULK_LOAD_THRESHOLD
+        if bulk:
+            drop_vector_index(conn, "job_postings")
         # CPU 임베딩은 수십 분 걸리므로 구간마다 바로 적재·커밋한다
         # — 중간에 중단돼도 그때까지 처리한 분량은 DB에 남는다
         n = 0
@@ -196,6 +208,8 @@ def run(limit: int | None = None, dry_run: bool = False, fresh: bool = False) ->
                 row["embedding"] = vec
             n += upsert_job_postings(conn, part)
             print(f"job_postings 적재 진행 {n}/{len(expanded)}행", flush=True)
+        if bulk:
+            create_vector_index(conn, "job_postings")
         print(f"job_postings 테이블에 {n}행 적재 완료")
     finally:
         conn.close()

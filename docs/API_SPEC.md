@@ -72,4 +72,4 @@
 
 1. 스키마 변경은 `backend/app/schemas/career.py` 먼저 수정
 2. `frontend/src/types/api.ts` 동기화
-3. 이 문서 갱신 후 팀 공유
+3. 이 문서 갱신
