@@ -16,6 +16,8 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 EMBEDDING_MODEL = "BAAI/bge-m3"
+# data-pipeline/embedding/common.py 의 EMBEDDING_REVISION 과 일치시킬 것 — DB 벡터와 같은 가중치 보장
+EMBEDDING_REVISION = "5617a9f61b028005a4858fdac845db406aefb181"
 EMBEDDING_DIM = 1024  # db/models.py 의 Vector 차원과 일치해야 함
 # data-pipeline/embedding/common.py 의 EMBED_MAX_SEQ_LENGTH 와 일치시킬 것
 EMBED_MAX_SEQ_LENGTH = 512
@@ -33,7 +35,7 @@ def get_model():
             if _model is None:
                 from sentence_transformers import SentenceTransformer
 
-                model = SentenceTransformer(EMBEDDING_MODEL)
+                model = SentenceTransformer(EMBEDDING_MODEL, revision=EMBEDDING_REVISION)
                 model.max_seq_length = EMBED_MAX_SEQ_LENGTH
                 _model = model
     return _model

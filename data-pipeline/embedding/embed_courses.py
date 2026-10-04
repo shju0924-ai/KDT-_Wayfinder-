@@ -16,7 +16,10 @@ import os
 import pandas as pd
 
 from embedding.common import (
+    BULK_LOAD_THRESHOLD,
     chunk_text,
+    create_vector_index,
+    drop_vector_index,
     embed_passages,
     ensure_tables,
     get_connection,
@@ -83,13 +86,11 @@ def load_courses() -> list[dict]:
 LOAD_CHUNK = 1000
 
 
-def run(limit: int | None = None, dry_run: bool = False, fresh: bool = False) -> None:
+def prepare(limit: int | None = None) -> list[dict]:
+    """CSV 로드 → 청킹까지 마친 적재 대상 행 (export_vectors.py 와 공유)."""
     rows = load_courses()
     if limit:
         rows = rows[:limit]
-    if not rows:
-        print("적재할 훈련과정이 없습니다.")
-        return
 
     expanded: list[dict] = []
     for row in rows:
@@ -100,7 +101,15 @@ def run(limit: int | None = None, dry_run: bool = False, fresh: bool = False) ->
             for i, chunk in enumerate(chunks, start=1):
                 expanded.append({**row, "source_id": f"{row['source_id']}#c{i}", "content_text": chunk})
 
-    print(f"훈련과정 {len(rows)}건 → 청킹 후 {len(expanded)}행, 임베딩 시작")
+    print(f"훈련과정 {len(rows)}건 → 청킹 후 {len(expanded)}행")
+    return expanded
+
+
+def run(limit: int | None = None, dry_run: bool = False, fresh: bool = False) -> None:
+    expanded = prepare(limit)
+    if not expanded:
+        print("적재할 훈련과정이 없습니다.")
+        return
 
     if dry_run:
         vectors = embed_passages([r["content_text"] for r in expanded])
@@ -113,6 +122,9 @@ def run(limit: int | None = None, dry_run: bool = False, fresh: bool = False) ->
         if fresh:
             truncate_table(conn, "training_courses")
             print("training_courses 테이블 비움 (만료·개강 과정 제거)")
+        bulk = len(expanded) >= BULK_LOAD_THRESHOLD
+        if bulk:
+            drop_vector_index(conn, "training_courses")
         # CPU 임베딩은 수십 분 걸리므로 구간마다 바로 적재·커밋한다
         # — 중간에 중단돼도 그때까지 처리한 분량은 DB에 남는다
         n = 0
@@ -121,7 +133,9 @@ def run(limit: int | None = None, dry_run: bool = False, fresh: bool = False) ->
             for row, vec in zip(part, embed_passages([r["content_text"] for r in part])):
                 row["embedding"] = vec
             n += upsert_training_courses(conn, part)
-            print(f"training_courses 적재 진행 {n}/{len(expanded)}행")
+            print(f"training_courses 적재 진행 {n}/{len(expanded)}행", flush=True)
+        if bulk:
+            create_vector_index(conn, "training_courses")
         print(f"training_courses 테이블에 {n}행 적재 완료")
     finally:
         conn.close()
