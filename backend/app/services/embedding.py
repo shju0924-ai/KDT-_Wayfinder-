@@ -9,11 +9,18 @@ bge-m3는 query/passage 프리픽스 구분이 없어 검색 대상·검색어 �
 """
 import asyncio
 import json
+import logging
 import threading
 from urllib.parse import urlencode
 
+import httpx
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+from app.core.config import settings
+from app.db.session import SessionLocal
+
+logger = logging.getLogger(__name__)
 
 EMBEDDING_MODEL = "BAAI/bge-m3"
 # data-pipeline/embedding/common.py 의 EMBEDDING_REVISION 과 일치시킬 것 — DB 벡터와 같은 가중치 보장
@@ -42,15 +49,60 @@ def get_model():
 
 
 def _encode(texts: list[str]) -> list[list[float]]:
+    if settings.embedding_api_url:
+        vecs = _encode_remote(texts)
+        if vecs is not None:
+            return vecs
     # 정규화 후 저장·검색 — pgvector 코사인 거리(<=>)와 일관
     vecs = get_model().encode(texts, batch_size=16, normalize_embeddings=True)
     return [[float(x) for x in v] for v in vecs]
+
+
+def _encode_remote(texts: list[str]) -> list[list[float]] | None:
+    """GPU 임베딩 서버로 계산한다. 실패하거나 모델·리비전이 다르면 None — 호출부가 로컬로 계산한다.
+
+    로컬 CPU는 모델 로드만 수 분(RAM 8GB)이라 서버가 있으면 그쪽을 쓴다."""
+    try:
+        resp = httpx.post(
+            f"{settings.embedding_api_url.rstrip('/')}/embed",
+            json={"texts": texts},
+            timeout=httpx.Timeout(60, connect=3),
+        )
+        resp.raise_for_status()
+        body = resp.json()
+    except (httpx.HTTPError, ValueError) as e:
+        logger.warning("원격 임베딩 실패, 로컬로 계산: %r", e)
+        return None
+    if body.get("model") != EMBEDDING_MODEL or body.get("revision") != EMBEDDING_REVISION:
+        logger.warning("원격 임베딩 모델 불일치(%s@%s), 로컬로 계산", body.get("model"), body.get("revision"))
+        return None
+    vecs = body.get("vectors") or []
+    if len(vecs) != len(texts) or any(len(v) != EMBEDDING_DIM for v in vecs):
+        logger.warning("원격 임베딩 응답 형식 이상, 로컬로 계산")
+        return None
+    return vecs
 
 
 async def embed_query(text_input: str) -> list[float]:
     """검색어 임베딩 — 사용자 역량 프로필·역량 격차 등 STEP 3·4의 유사도 검색 입력값."""
     # CPU 연산이 이벤트 루프를 막지 않도록 스레드에서 실행
     return (await asyncio.to_thread(_encode, [text_input]))[0]
+
+
+async def embed_queries(texts: list[str]) -> list[list[float]]:
+    """검색어 여러 개를 한 번에 임베딩 — 호출(원격이면 왕복) 횟수를 줄인다."""
+    if not texts:
+        return []
+    return await asyncio.to_thread(_encode, texts)
+
+
+async def similarities_to(base: str, texts: list[str]) -> list[float]:
+    """base 와 texts 각각의 코사인 유사도 — 직무명끼리 '사실상 같은 직무'인지 비교할 때 쓴다."""
+    if not texts:
+        return []
+    vecs = await asyncio.to_thread(_encode, [base, *texts])
+    head = vecs[0]
+    return [sum(a * b for a, b in zip(head, v)) for v in vecs[1:]]
 
 
 def embed_passages(texts: list[str]) -> list[list[float]]:
@@ -115,7 +167,20 @@ _COURSE_SEARCH_SQL = text(
 )
 
 
-_HNSW_SETTINGS = ("hnsw.ef_search", "hnsw.iterative_scan", "enable_seqscan")
+async def run_db(fn, *args):
+    """동기 DB 작업을 스레드에서 자체 세션으로 실행한다.
+
+    async 엔드포인트 안에서 동기 쿼리를 바로 부르면 쿼리 시간(벡터 검색 0.5~1초) 동안 이벤트 루프가 멈춰
+    다른 사용자의 요청까지 모두 기다렸다(8명 동시 검증에서 GPU 사용률 41%). 스레드마다 세션을 따로 쓰는 건
+    SQLAlchemy 세션이 스레드 간 공유에 안전하지 않고, 한 요청 안에서도 검색을 동시에(gather) 보내기 때문이다."""
+    def work():
+        db = SessionLocal()
+        try:
+            return fn(db, *args)
+        finally:
+            db.close()
+
+    return await asyncio.to_thread(work)
 
 
 def _execute_hnsw(db: Session, sql: str, params: dict, candidates: int) -> list[dict]:
@@ -126,17 +191,50 @@ def _execute_hnsw(db: Session, sql: str, params: dict, candidates: int) -> list[
       (pgvector 0.8+). relaxed_order 라 순서가 약간 어긋날 수 있지만 바깥 쿼리가 다시 정렬한다.
     - enable_seqscan=off: 후보가 수백 건 이상이면 플래너가 전체 스캔을 더 싸다고 오판한다
       (실측 전체 스캔 ~4초 vs HNSW ~0.4초).
-    이 쿼리에서만 적용되도록 실행 뒤 원래 값으로 되돌린다.
+    SET LOCAL 이라 트랜잭션이 끝나면 원래 값으로 돌아간다.
+
+    읽기 전용 검색이므로 끝나면 바로 트랜잭션을 닫아 연결을 풀에 돌려준다. 열어 둔 채로 두면
+    뒤이은 로컬 LLM 호출(최대 30분) 동안 'idle in transaction' 연결이 붙잡혀 있다가, 그 사이 DB 쪽
+    연결이 끊기면 요청 종료 시 ROLLBACK 이 실패해 응답 뒤 ASGI 예외·클라이언트 연결 끊김이 났다.
     """
-    db.execute(text(f"SET LOCAL hnsw.ef_search = {int(candidates)}"))
-    db.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
-    db.execute(text("SET LOCAL enable_seqscan = off"))
     try:
+        db.execute(text(f"SET LOCAL hnsw.ef_search = {int(candidates)}"))
+        db.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
+        db.execute(text("SET LOCAL enable_seqscan = off"))
         rows = db.execute(text(sql), {**params, "candidates": candidates}).mappings().all()
     finally:
-        for name in _HNSW_SETTINGS:
-            db.execute(text(f"RESET {name}"))
+        db.rollback()
     return [dict(r) for r in rows]
+
+
+_SAME_TITLE_SQL = text(
+    """
+    SELECT job_title, snippet FROM (
+        SELECT job_title, left(required_skills_text, :chars) AS snippet,
+               row_number() OVER (PARTITION BY job_title ORDER BY collected_at DESC NULLS LAST, id) AS rn
+        FROM job_postings
+        WHERE job_title = ANY(:titles)
+          AND source_id NOT LIKE '%#c%'
+          AND coalesce(required_skills_text, '') <> ''
+    ) t
+    WHERE rn <= :per_title
+    """
+)
+
+
+def sample_postings_by_title(db: Session, titles: list[str], per_title: int = 5, chars: int = 300) -> dict[str, list[str]]:
+    """직무명마다 같은 이름의 공고 발췌를 몇 건씩 — 공고 한 건의 회사 특수 요구가 아니라
+    그 직무에 공통으로 요구되는 역량을 LLM이 가려내도록 근거를 넓힌다."""
+    if not titles:
+        return {}
+    try:
+        rows = db.execute(_SAME_TITLE_SQL, {"titles": list(set(titles)), "per_title": per_title, "chars": chars}).all()
+    finally:
+        db.rollback()
+    out: dict[str, list[str]] = {}
+    for title, snippet in rows:
+        out.setdefault(title, []).append(snippet)
+    return out
 
 
 def build_work24_course_url(source_id: str) -> str | None:
@@ -185,8 +283,8 @@ async def search_similar_jobs(
     else:
         skillvec = await embed_query(skill_text)
         rankvec = skillvec
-    return _execute_hnsw(
-        db,
+    return await run_db(
+        _execute_hnsw,
         f"SELECT * FROM ({_JOB_SEARCH_SQL.text}) t ORDER BY ranking_similarity DESC LIMIT :limit",
         {"skillvec": json.dumps(skillvec), "rankvec": json.dumps(rankvec), "limit": limit},
         JOB_CANDIDATES,
@@ -201,12 +299,43 @@ async def search_similar_courses(db: Session, gap_text: str, limit: int = 5) -> 
     if not gap_text.strip():
         return []
     qvec = await embed_query(gap_text)
-    courses = _execute_hnsw(
-        db,
+    courses = await run_db(
+        _execute_hnsw,
         f"SELECT * FROM ({_COURSE_SEARCH_SQL.text}) t ORDER BY similarity DESC LIMIT :limit",
         {"qvec": json.dumps(qvec), "limit": limit},
         COURSE_CANDIDATES,
     )
+    labels = await run_db(_ncs_labels, [c["ncs_cd"] for c in courses if c.get("ncs_cd")])
     for course in courses:
         course["source_url"] = build_work24_course_url(course["source_id"])
+        # HRD-Net 원천에는 과정 설명이 없고 ncs_nm 도 비어 있다 — NCS 세분류명·능력단위명으로 과정 내용을 보완한다
+        sub, units = labels.get(course.get("ncs_cd") or "", (None, None))
+        course["ncs_nm"] = course.get("ncs_nm") or sub
+        course["ncs_units"] = units
     return courses
+
+
+_NCS_LABEL_SQL = text(
+    """
+    SELECT left(ncs_code, 8) AS cd, max(sub_category) AS sub,
+           string_agg(unit_name, ', ' ORDER BY ncs_code) FILTER (WHERE unit_name NOT LIKE '%구버전%') AS units
+    FROM ncs_units
+    WHERE left(ncs_code, 8) = ANY(:codes)
+    GROUP BY 1
+    """
+)
+
+
+def _ncs_labels(db: Session, codes: list[str]) -> dict[str, tuple[str | None, str | None]]:
+    """훈련과정 NCS 세분류 코드(8자리) → (세분류명, 능력단위명 앞 몇 개)."""
+    codes = list({c for c in codes if c})
+    if not codes:
+        return {}
+    try:
+        rows = db.execute(_NCS_LABEL_SQL, {"codes": codes}).all()
+    except Exception as e:  # 라벨은 보조 정보 — 실패해도 검색 결과는 돌려준다
+        logger.warning("NCS 라벨 조회 실패: %r", e)
+        return {}
+    finally:
+        db.rollback()
+    return {cd: (sub, ", ".join((units or "").split(", ")[:5]) or None) for cd, sub, units in rows}

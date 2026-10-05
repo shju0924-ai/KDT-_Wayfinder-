@@ -5,6 +5,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   composeSurvey,
+  diagnoseRisk,
   generateProfile,
   generateRoadmap,
   matchJobs,
@@ -15,6 +16,7 @@ import type {
   JobMatch,
   JobSearchTrack,
   LearningRoadmap,
+  RiskDiagnosis,
   SkillItem,
   SurveyInput,
 } from "../types/api";
@@ -30,8 +32,9 @@ import JobMatchList from "./cards/JobMatchList";
 import JobPathChooser from "./cards/JobPathChooser";
 import RoadmapCard from "./cards/RoadmapCard";
 import ReflectionCard from "./cards/ReflectionCard";
+import RiskDiagnosisCard from "./cards/RiskDiagnosisCard";
 
-type CardKind = "skills" | "job-path" | "jobs" | "roadmap" | "reflect";
+type CardKind = "risk" | "skills" | "job-path" | "jobs" | "roadmap" | "reflect";
 
 interface Msg {
   id: number;
@@ -62,9 +65,22 @@ function errorText(e: unknown): string {
 export default function Chat({ onJourney, onNewChat }: Props) {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [busy, setBusy] = useState(false);
+  // 로컬 모델은 단계당 수 분~20분 — 멈춘 것으로 오해하지 않도록 경과 시간을 보여준다
+  const [busySeconds, setBusySeconds] = useState(0);
+  useEffect(() => {
+    if (!busy) return;
+    setBusySeconds(0);
+    const started = Date.now();
+    const id = window.setInterval(
+      () => setBusySeconds(Math.floor((Date.now() - started) / 1000)),
+      1000,
+    );
+    return () => window.clearInterval(id);
+  }, [busy]);
 
   // 각 단계의 실제 API 응답
   const [career, setCareer] = useState<CareerInput | null>(null);
+  const [risk, setRisk] = useState<RiskDiagnosis | null>(null);
   const [draftSkills, setDraftSkills] = useState<SkillItem[] | null>(null);
   const [confirmedSkills, setConfirmedSkills] = useState<SkillItem[] | null>(null);
   const [jobSearchTrack, setJobSearchTrack] = useState<JobSearchTrack | null>(null);
@@ -131,9 +147,30 @@ export default function Chat({ onJourney, onNewChat }: Props) {
     );
   }, [doneItems, roadmap, reflectShown]);
 
-  // 경력 서사를 확보하면 곧바로 STEP 2(역량 분해)로 안내한다.
-  const startProfile = (input: CareerInput) => {
+  // 경력 서사를 확보하면 STEP 1(업무별 AI 영향 점수)을 보여주고 STEP 2(역량 분해)로 안내한다.
+  // 진단은 참고 정보라 실패해도 여정은 막지 않는다.
+  const startProfile = async (input: CareerInput) => {
     setCareer(input);
+    setBusy(true);
+    try {
+      const result = await diagnoseRisk(input);
+      setRisk(result);
+      push(
+        {
+          role: "assistant",
+          text: "먼저 지금 하는 업무들이 AI의 영향을 얼마나 받는지 점수로 나눠봤어요.\n좋다·나쁘다 판정은 하지 않았어요 — 업무별 근거를 보고 직접 판단해 주세요.",
+        },
+        { role: "assistant", card: "risk" },
+      );
+    } catch (e) {
+      push({
+        role: "assistant",
+        text: `AI 영향 점수는 계산하지 못했어요. 역량 분석은 그대로 진행할 수 있어요.\n(${errorText(e)})`,
+        error: true,
+      });
+    } finally {
+      setBusy(false);
+    }
     push({
       role: "assistant",
       text: "지금까지의 경험을 다른 직무로도 옮겨갈 수 있는 역량 단위로 분해해 볼까요?",
@@ -160,7 +197,7 @@ export default function Chat({ onJourney, onNewChat }: Props) {
       role: "assistant",
       text: "들려주신 경력을 경력 서사로 정리했어요.",
     });
-    startProfile({ raw_text: text, current_job_title: null });
+    await startProfile({ raw_text: text, current_job_title: null });
   };
 
   const handleFile = async (file: File) => {
@@ -184,7 +221,7 @@ export default function Chat({ onJourney, onNewChat }: Props) {
         role: "assistant",
         text: `${parsed.filename}에서 경력 텍스트 ${parsed.char_count.toLocaleString()}자를 추출했어요.${warningText}`,
       });
-      startProfile({ raw_text: parsed.text, current_job_title: null });
+      await startProfile({ raw_text: parsed.text, current_job_title: null });
     } catch (e) {
       push({ role: "assistant", text: errorText(e), error: true });
     } finally {
@@ -206,7 +243,7 @@ export default function Chat({ onJourney, onNewChat }: Props) {
         role: "assistant",
         text: "답변해주신 내용을 경력 서사로 정리했어요.",
       });
-      startProfile({ raw_text: career_text, current_job_title: survey.job_title });
+      await startProfile({ raw_text: career_text, current_job_title: survey.job_title });
     } catch (e) {
       push({ role: "assistant", text: errorText(e), error: true });
     } finally {
@@ -222,6 +259,11 @@ export default function Chat({ onJourney, onNewChat }: Props) {
     try {
       const profile = await generateProfile(career);
       setDraftSkills(profile.skills);
+      // 이력서·자유 텍스트 경로는 직무명 입력이 없으므로, 서버가 경력 서사에서 뽑은 현재 직무를 기억해
+      // STEP 3에서 '같은 직무' 후보를 걸러내는 데 쓴다
+      if (!career.current_job_title && profile.current_job_title) {
+        setCareer({ ...career, current_job_title: profile.current_job_title });
+      }
       push(
         {
           role: "assistant",
@@ -307,7 +349,11 @@ export default function Chat({ onJourney, onNewChat }: Props) {
     push({ role: "user", text: `"${job.job_title}"(으)로 가는 길을 보여주세요.` });
     setBusy(true);
     try {
-      const result = await generateRoadmap({ skills: confirmedSkills }, job.job_title);
+      const result = await generateRoadmap(
+        { skills: confirmedSkills },
+        job.job_title,
+        job.missing_skills,
+      );
       setRoadmap(result);
       push(
         {
@@ -355,6 +401,8 @@ export default function Chat({ onJourney, onNewChat }: Props) {
 
   const renderCard = (kind: CardKind) => {
     switch (kind) {
+      case "risk":
+        return risk ? <RiskDiagnosisCard data={risk} /> : null;
       case "skills":
         return draftSkills ? (
           <SkillProfileCard
@@ -545,6 +593,13 @@ export default function Chat({ onJourney, onNewChat }: Props) {
                   <i />
                   <i />
                 </span>
+                {busySeconds >= 10 && (
+                  <p className="busy-note">
+                    분석 중이에요 · {Math.floor(busySeconds / 60)}분 {busySeconds % 60}초 경과
+                    <br />
+                    로컬 AI 모델은 단계에 따라 최대 20분 정도 걸릴 수 있어요. 창을 닫지 말고 기다려주세요.
+                  </p>
+                )}
               </div>
             </div>
           )}

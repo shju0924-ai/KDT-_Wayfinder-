@@ -14,7 +14,8 @@ router = APIRouter()
 @router.post("", response_model=SkillProfile, summary="경력 서사 → 전이 가능 역량 분해")
 async def generate_profile(career: CareerInput) -> SkillProfile:
     try:
-        skills = await llm.decompose_skills(career.raw_text)
+        skills, extracted_job = await llm.decompose_skills(career.raw_text)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"역량 분해 실패: {e}") from e
-    return SkillProfile(skills=skills)
+        raise HTTPException(status_code=502, detail=f"역량 분해 실패: {e!r}") from e
+    # 사용자가 직접 적은 직무명(설문)이 있으면 그것이 우선 — LLM 추출값은 이력서·자유 텍스트 경로용
+    return SkillProfile(skills=skills, current_job_title=career.current_job_title or extracted_job)

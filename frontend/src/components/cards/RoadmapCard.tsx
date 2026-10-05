@@ -21,6 +21,7 @@ interface Props {
 
 export default function RoadmapCard({ data, done, onToggle }: Props) {
   const totalWeeks = data.items.reduce((sum, it) => sum + it.duration_weeks, 0);
+  const withCourse = data.items.filter((it) => it.course).length;
   const doneSet = new Set(done);
   const doneCount = data.items.filter((it) => doneSet.has(it.learning_item)).length;
   const total = data.items.length;
@@ -34,7 +35,8 @@ export default function RoadmapCard({ data, done, onToggle }: Props) {
       <div className="card-eyebrow">STEP 4 · 학습 로드맵</div>
       <h3>{data.target_job} 전환 로드맵</h3>
       <p className="roadmap-summary">
-        총 {total}개 학습 항목 · 약 {totalWeeks}주 과정
+        총 {total}개 학습 항목 · 훈련과정 {withCourse}개 연결 · 약 {totalWeeks}주
+        {total > withCourse && ` (훈련과정 없는 ${total - withCourse}개 항목은 기간 미정)`}
       </p>
 
       {/* 완주 진행률 — 실행 단계의 핵심 지표 */}
@@ -91,11 +93,20 @@ export default function RoadmapCard({ data, done, onToggle }: Props) {
               </div>
               <div className="tl-body">
                 <div className="tl-meta">
-                  <span className="tl-weeks">{it.duration_weeks}주</span>
+                  {/* 0주 = 맞는 훈련과정이 DB에 없어 기간을 알 수 없는 항목 */}
+                  <span className="tl-weeks">
+                    {it.duration_weeks > 0 ? `${it.duration_weeks}주` : "기간 미정"}
+                  </span>
+                  {!it.course && <span className="tag">훈련과정 없음</span>}
                   {isNext && <span className="tl-now">지금 할 일</span>}
                 </div>
                 <div className="tl-title">{it.learning_item}</div>
                 <div className="tl-gap">보완 역량 — {it.skill_gap}</div>
+                {it.weak_reason && (
+                  <div className="weak-evidence" role="note">
+                    <strong>근거 약함</strong> {it.weak_reason}
+                  </div>
+                )}
                 {it.course && (
                   <div className="tl-course">
                     <span className="tl-course-label">고용24 실제 훈련과정</span>

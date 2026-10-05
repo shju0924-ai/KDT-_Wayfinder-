@@ -1,11 +1,24 @@
 """Wayfinder — AI 전환기 커리어 네비게이터 백엔드 진입점."""
+import threading
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.api.routes import diagnosis, profile, jobs, roadmap
+from app.services import automation
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    # STEP 1 진단의 NCS 매칭 색인을 미리 준비한다(첫 실행 2분 남짓, 이후 디스크 캐시) — 요청은 막지 않는다
+    threading.Thread(target=automation.warm_ncs_index, daemon=True).start()
+    yield
+
 
 app = FastAPI(
+    lifespan=lifespan,
     title="Wayfinder API",
     description="AI 전환기 커리어 네비게이터 — 진단·분해·탐색·설계 4단계 파이프라인",
     version="0.1.0",

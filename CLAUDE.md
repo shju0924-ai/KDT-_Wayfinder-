@@ -16,7 +16,7 @@
 ## 핵심 규칙
 
 - **스키마 동기화**: `backend/app/schemas/career.py` ↔ `frontend/src/types/api.ts` 는 1:1 대응. 한쪽을 바꾸면 반드시 다른 쪽도 수정.
-- **임베딩 일치**: 모델·리비전·차원(로컬 `BAAI/bge-m3` @ `5617a9f`, 1024차원, max_seq_length 512, sentence-transformers)은 `backend/app/services/embedding.py` 와 `data-pipeline/embedding/common.py` 가 항상 같아야 하고, `db/models.py` Vector 차원도 일치해야 함. 검색 대상(채용공고·훈련과정)과 검색어(사용자 역량)는 반드시 같은 모델로 임베딩할 것 — 섞으면 유사도가 무의미해짐. 모델을 바꾸면 DB 벡터 전부 재임베딩 필요.
+- **임베딩 일치**: 모델·리비전·차원(로컬 `BAAI/bge-m3` @ `5617a9f`, 1024차원, max_seq_length 512, sentence-transformers)은 `backend/app/services/embedding.py`, `data-pipeline/embedding/common.py`, `scripts/runpod/embed_server.py`(원격 GPU 임베딩) 가 항상 같아야 하고, `db/models.py` Vector 차원도 일치해야 함. 검색 대상(채용공고·훈련과정)과 검색어(사용자 역량)는 반드시 같은 모델로 임베딩할 것 — 섞으면 유사도가 무의미해짐. 모델을 바꾸면 DB 벡터 전부 재임베딩 필요.
 - **근거 의무화**: LLM 출력(역량 분해·진단·로드맵)은 항상 evidence/rationale/source 필드를 채워야 함 — 환각 억제가 핵심 설계 포인트.
 - **민감정보**: 이력서 원문은 DB에 저장하지 않는 것이 기본.
 - 실행 방법은 `README.md` 참고.

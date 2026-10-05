@@ -21,7 +21,7 @@ def test_calculate_risk_normalizes_task_shares():
     )
     assert result["task_based_score"] == 65
     assert result["risk_score"] == 65
-    assert result["risk_level"] == "높음"
+    assert "risk_level" not in result  # 등급 판정은 내지 않는다
     assert result["automation_share"] == 75
     assert result["human_centered_share"] == 25
 
@@ -37,4 +37,3 @@ def test_calculate_risk_uses_external_exposure_as_25_percent_calibration():
     assert result["task_based_score"] == 60
     assert result["empirical_score"] == 30
     assert result["risk_score"] == 52.5
-    assert result["risk_level"] == "보통"
