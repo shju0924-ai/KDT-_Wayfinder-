@@ -9,7 +9,6 @@ AI 전환기에 일하는 사람이 자신의 경력을 업무와 역량으로 �
 ## 제공 기능
 
 - 자유 텍스트 또는 이력서 파일(PDF, DOCX, HWP 5.x, HWPX)에서 경력 텍스트 추출
-- 경력 업무 단위 분석과 자동화 위험도 진단
 - 전이 가능한 역량 프로필 생성 및 사용자 검토
 - 실제 채용공고 기반 인접 직무 탐색
 - HRD-Net 훈련과정 근거의 학습 로드맵 생성
@@ -94,6 +93,31 @@ python run_pipeline.py
 
 `python run_pipeline.py --limit 20 --dry-run`으로 DB에 쓰지 않는 소량 점검도 할 수 있습니다.
 
+#### RunPod GPU로 LLM·임베딩 돌리기 (권장)
+
+로컬 PC(RAM 8GB)에서는 LLM이 단계당 수 분, 임베딩 모델 로딩만 2분 이상 걸립니다. RunPod GPU Pod(A40 기준)에
+Ollama(`qwen3.5:9b`)와 임베딩 서버를 띄우고 SSH 터널로 연결하면, DB·백엔드·프론트는 로컬 그대로 두고
+4단계 전체가 약 100초로 줄어듭니다.
+
+1. Pod를 SSH(22/TCP) 열린 템플릿으로 만들고, 로컬 공개키(`~/.ssh/id_ed25519.pub`)를 RunPod Settings → SSH Public Keys 에 등록
+2. `scripts/runpod/` 를 Pod의 `/workspace/wayfinder/` 에 올리고 실행 (Pod 재시작 후에도 이것만 다시 실행)
+
+```bash
+bash /workspace/wayfinder/start.sh
+```
+
+3. 로컬에서 터널 열기 — IP·포트는 Pod Jupyter 터미널의 `echo $RUNPOD_PUBLIC_IP $RUNPOD_TCP_PORT_22`
+
+```bash
+ssh -N -L 11434:127.0.0.1:11434 -L 8010:127.0.0.1:8010 root@<IP> -p <PORT> -i ~/.ssh/id_ed25519
+```
+
+4. `backend/.env` 에 `LLM_PROVIDER=ollama`, `OLLAMA_MODEL=qwen3.5:9b`, `EMBEDDING_API_URL=http://localhost:8010`
+
+터널이 끊기면 임베딩은 로컬 계산으로 자동 전환됩니다(느려짐). Pod에 Network Volume이 없으면 Stop 시
+`/workspace` 의 모델이 지워지므로 `start.sh` 가 다시 내려받습니다. 품질 회귀 점검은
+`cd backend && python -m scripts.e2e_eval` (페르소나 4명, 병렬 약 5~6분).
+
 #### GPU 서버에서 임베딩만 계산하기
 
 전량(약 7만 행) 임베딩은 CPU로 하루 이상 걸립니다. GPU 서버(예: RunPod A40, 약 10분)에서 벡터만 계산해 오고 적재는 로컬에서 할 수 있습니다. GPU 서버에는 DB가 필요 없습니다.
@@ -112,62 +136,18 @@ python run_pipeline.py --skip-collect
 
 `EMBED_CACHE`에 있는 텍스트는 모델을 실행하지 않고 저장된 벡터를 쓰고, 없는 텍스트만 로컬에서 계산합니다. 모델 리비전·입력 길이·정규화가 같아 로컬 계산 결과와 동일한 벡터입니다(코사인 유사도 1.0 확인). 5,000행 이상을 넣을 때는 HNSW 인덱스를 잠시 지우고 적재한 뒤 다시 만듭니다.
 
-## 자동화 위험도 계산 방식
-
-자동화 위험도는 해고 확률이나 개인의 대체 가능성을 뜻하지 않습니다. 현재 입력한 경력에서 어떤 업무가 AI의 영향을 받을 수 있는지를 설명하기 위한 0~100 점수입니다.
-
-1. LLM이 경력 서사를 3~7개의 실제 업무와 업무 비중으로 구조화합니다.
-2. 각 업무의 자동화 점수를 업무 비중으로 가중 평균해 `업무 기반 점수`를 계산합니다.
-3. 영어 직업명과 매칭된 Anthropic·ILO/NASK 직업별 AI 노출도를 평균해 `외부 노출도`를 만듭니다.
-4. 최종 점수는 다음 식으로 계산합니다.
-
-```text
-업무 기반 점수 = Σ(업무 비중 × 업무별 자동화 점수)
-최종 위험도 = 업무 기반 점수 × 0.75 + 외부 노출도 × 0.25
-```
-
-직업명 매칭이 없거나 DB에 참고점수가 없으면 외부 노출도를 억지로 적용하지 않고 업무 기반 점수만 사용합니다.
-
-NCS는 자동화 점수를 제공하지 않습니다. 경력에서 나온 업무를 국내 능력단위와 연결하고, 화면에 업무 근거를 표시하는 데만 사용합니다. OECD와 한국고용정보원 보고서는 업무별 판단을 해석하고 한국 노동시장 맥락을 설명하는 방법론 근거이며, 현재 수식에 직접 점수로 합산하지 않습니다.
-
-## 위험도 수식에 사용한 자료와 원문 링크
-
-### 직접 수치로 적재하는 자료
-
-| 자료 | 서비스에서의 사용 | 원문 링크 |
-|---|---|---|
-| Anthropic Economic Index `job_exposure.csv` | 실제 Claude 사용을 반영한 직업별 `observed_exposure`를 0~100점으로 변환해 외부 노출도에 사용 | https://huggingface.co/datasets/Anthropic/EconomicIndex/tree/main/labor_market_impacts |
-| Anthropic 다운로드 CSV | 파이프라인이 실제로 내려받는 파일 | https://huggingface.co/datasets/Anthropic/EconomicIndex/resolve/main/labor_market_impacts/job_exposure.csv?download=true |
-| ILO–NASK 2025 GenAI 직업 노출도 | ISCO-08 직업별 잠재 생성형 AI 노출도를 0~100점으로 변환해 외부 노출도에 사용 | https://www.ilo.org/publications/generative-ai-and-jobs-refined-global-index-occupational-exposure |
-| ILO–NASK 재현용 XLSX | 현재 파이프라인이 읽는 6자리 직업 코드·점수 파일 | https://github.com/pgmyrek/POLAND_2025_GenAI_scores_6digit_occupations |
-
-Anthropic의 `observed_exposure`와 ILO/NASK의 `potential_genai_exposure`은 서로 다른 관점의 **AI 노출도**입니다. 둘 다 곧바로 고용 대체나 해고 확률을 뜻하지 않습니다.
-
-### 업무 표준화와 해석 기준
-
-| 자료 | 서비스에서의 사용 | 원문 링크 |
-|---|---|---|
-| 한국산업인력공단 NCS 기준정보 API | 경력 업무를 국내 능력단위와 연결하고 과업 근거를 표시 | https://www.data.go.kr/data/15063879/openapi.do |
-| OECD AI Exposure Measure (2026) | 언어·추론·사회성·신체 능력 등 AI 역량과 직업 요구 역량의 간극을 해석하는 방법론 기준 | https://www.oecd.org/en/publications/the-oecd-ai-exposure-measure_f3da0f0a-en.html |
-| OECD 보고서 PDF | 파이프라인이 방법론 원문으로 내려받는 PDF | https://www.oecd.org/content/dam/oecd/en/publications/reports/2026/05/the-oecd-ai-exposure-measure_489cfd42/f3da0f0a-en.pdf |
-| 한국고용정보원, 「인공지능에 의한 화이트칼라의 직무 대체 및 변화」 | 국내 직무활동과 직무 변화·대체 가능성을 해석하는 기준 | https://www.keis.or.kr/keis/ko/proj/113/pblc/detail.do?categoryIdx=131&pubIdx=11169 |
-
 ## 데이터 흐름
 
 ```text
-이력서 텍스트 또는 파일
-  → FastAPI: 텍스트 추출·경력 업무 분석
-  → NCS 능력단위 매칭 + Anthropic/ILO 직업 노출도 보정
-  → 위험도 카드
-  → 역량 프로필
+이력서 텍스트·파일 또는 설문 응답
+  → FastAPI: 경력 텍스트 추출·조립
+  → 역량 프로필 (LLM 분해 + 사용자 검토)
   → pgvector 채용공고 유사도 검색
   → HRD-Net 훈련과정 기반 로드맵
 ```
 
 | DB 테이블 | 적재 데이터 | 사용 단계 |
 |---|---|---|
-| `ncs_units` | NCS 능력단위 | STEP 1 업무 근거 |
-| `automation_occupation_scores` | Anthropic·ILO/NASK 직업별 노출도 | STEP 1 외부 노출도 보정 |
 | `job_postings` | 서울·경기 채용공고와 임베딩 | STEP 3 인접 직무 탐색 |
 | `training_courses` | HRD-Net 훈련과정과 임베딩 | STEP 4 학습 로드맵 |
 
@@ -176,7 +156,7 @@ Anthropic의 `observed_exposure`와 ILO/NASK의 `potential_genai_exposure`은 �
 | 엔드포인트 | 설명 |
 |---|---|
 | `POST /api/diagnosis/parse-file` | PDF·DOCX·HWP·HWPX에서 이력서 텍스트 추출 |
-| `POST /api/diagnosis` | 경력 텍스트의 자동화 위험도 진단 |
+| `POST /api/diagnosis/survey` | 이력서가 없는 사용자의 설문 응답을 경력 텍스트로 조립 |
 | `POST /api/profile` | 경력 텍스트를 전이 가능한 역량으로 분해 |
 | `POST /api/jobs/match` | 역량과 채용공고의 유사도 기반 인접 직무 탐색 |
 | `POST /api/roadmap` | 목표 직무의 역량 격차와 훈련과정 기반 로드맵 생성 |
@@ -197,7 +177,7 @@ npm run build
 
 ```text
 frontend/       React + TypeScript UI
-backend/        FastAPI API, 파일 파싱, 위험도·LLM 서비스
+backend/        FastAPI API, 파일 파싱, LLM·임베딩 서비스
 data-pipeline/  공공데이터 수집, 임베딩, PostgreSQL 적재
 db/init/        PostgreSQL 초기화 시 pgvector 확장 생성
 docs/           아키텍처 문서·이미지, 개발 세션 기록

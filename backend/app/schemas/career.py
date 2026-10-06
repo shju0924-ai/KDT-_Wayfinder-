@@ -68,9 +68,8 @@ class RiskDiagnosis(BaseModel):
     """업무별 분석과 공개 데이터로 보정한 자동화 위험도 진단 결과."""
 
     job_title: str
-    risk_score: float = Field(..., ge=0, le=100, description="자동화 위험도 (0~100)")
-    risk_level: str = Field(..., description="낮음 | 보통 | 높음")
-    rationale: str = Field(..., description="진단 근거")
+    risk_score: float = Field(..., ge=0, le=100, description="자동화 위험도 (0~100). 등급 판정 없이 점수만 제공")
+    rationale: str = Field(..., description="점수 산출 방식 설명 (업무별 근거는 tasks[].rationale)")
     task_based_score: float = Field(..., ge=0, le=100)
     automation_share: float = Field(..., ge=0, le=100)
     augmentation_share: float = Field(..., ge=0, le=100)
@@ -101,6 +100,9 @@ class SkillItem(BaseModel):
 
 class SkillProfile(BaseModel):
     skills: list[SkillItem]
+    current_job_title: str | None = Field(
+        None, description="현재(최근) 직무명 — 사용자 입력값 또는 경력 서사에서 추출. STEP 3 같은 직무 제외에 사용"
+    )
 
 
 # ── STEP 3. 인접 직무 탐색 ─────────────────────────────────
@@ -122,6 +124,17 @@ class JobMatch(BaseModel):
     matched_skills: list[str] = Field(default_factory=list, description="적합 판정에 기여한 보유 역량")
     required_skills: list[str] = Field(default_factory=list, description="공고에서 확인된 핵심 요구역량")
     missing_skills: list[str] = Field(default_factory=list, description="요구역량 중 아직 없는 역량")
+    weak_reasons: list[str] = Field(
+        default_factory=list,
+        description="추천 근거가 약한 이유 — 숨기지 않고 표시해 사용자가 판단하게 한다. 비어 있으면 근거 충분",
+    )
+    ai_exposure_score: float | None = Field(
+        None, ge=0, le=100,
+        description="이 직무의 공개 AI 노출도 참고 점수(출처 평균). 판정 없음. 매칭 자료가 없으면 None",
+    )
+    ai_exposure_sources: list[RiskSource] = Field(
+        default_factory=list, description="노출도 출처별 점수와 매칭된 직업명"
+    )
 
 
 # ── STEP 4. 학습 로드맵 ────────────────────────────────────
@@ -141,10 +154,11 @@ class RoadmapItem(BaseModel):
     """학습 항목 하나."""
     skill_gap: str = Field(..., description="보완할 역량 격차")
     learning_item: str = Field(..., description="학습 항목명")
-    duration_weeks: int = Field(..., description="예상 소요 기간(주)")
+    duration_weeks: int = Field(..., ge=0, description="예상 소요 기간(주). 0이면 훈련과정이 없어 기간 미정")
     resources: list[str] = Field(default_factory=list, description="교육 자원 (KDT·HRD-Net 훈련과정 등)")
     source: str = Field(..., description="RAG 근거 출처")
     course: HrdCourse | None = Field(None, description="추천 근거가 된 실제 고용24 훈련과정")
+    weak_reason: str | None = Field(None, description="과정과 역량 격차의 연관 근거가 약한 이유. 없으면 None")
 
 
 class LearningRoadmap(BaseModel):

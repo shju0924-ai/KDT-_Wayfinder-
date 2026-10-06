@@ -31,6 +31,7 @@ export default function JobMatchList({ jobs, searchTrack, selected, onSelect }: 
       </h3>
       <p className="job-estimate-note">
         수요 전망과 전환 난이도는 채용공고 및 보유 역량을 바탕으로 AI가 추정한 참고값입니다.
+        AI 노출도는 ILO·Anthropic 공개 자료의 직업별 점수로, 고용 대체 확률이 아니며 해석은 직접 판단해 주세요.
       </p>
       <div className="job-list">
         {jobs.map((job) => {
@@ -69,6 +70,17 @@ export default function JobMatchList({ jobs, searchTrack, selected, onSelect }: 
                   </span>
                 </div>
               </div>
+              {/* 근거가 약한 추천은 숨기지 않고 이유를 보여준다 — 판단은 사용자 몫 */}
+              {job.weak_reasons.length > 0 && (
+                <div className="weak-evidence" role="note">
+                  <strong>근거 약함</strong>
+                  <ul>
+                    {job.weak_reasons.map((r) => (
+                      <li key={r}>{r}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               {(job.company || job.region) && (
                 <div className="job-source">
                   실제 공고 · {job.company ?? "회사명 미기재"}
@@ -85,6 +97,27 @@ export default function JobMatchList({ jobs, searchTrack, selected, onSelect }: 
                   <span className="fit-num">적합도 {job.fit_score}</span>
                 </div>
               )}
+
+              {/* 직무별 AI 노출도 — 점수와 출처·매칭 직업명만, 좋고 나쁨 판정은 하지 않는다 */}
+              <div className="job-exposure">
+                {job.ai_exposure_score != null ? (
+                  <>
+                    <div className="fit-row">
+                      <div className="fit-bar" aria-hidden>
+                        <div className="fit-fill" style={{ width: `${job.ai_exposure_score}%` }} />
+                      </div>
+                      <span className="fit-num">AI 노출도 {job.ai_exposure_score}</span>
+                    </div>
+                    <small>
+                      {job.ai_exposure_sources
+                        .map((s) => `${s.source}: ${s.label}${s.score != null ? ` ${s.score}` : ""}`)
+                        .join(" · ")}
+                    </small>
+                  </>
+                ) : (
+                  <small>이 직무와 매칭되는 공개 AI 노출도 자료가 없어요.</small>
+                )}
+              </div>
 
               {/* 공고를 '내 역량 / 공고 요구 / 아직 없는 것' 세 축으로 나눠 보여준다 */}
               <div className="job-skill-groups">

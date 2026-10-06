@@ -452,6 +452,14 @@ button:disabled {
   animation-delay: 0.3s;
 }
 
+/* 로컬 모델 대기 안내 — 긴 응답 중 경과 시간 */
+.busy-note {
+  margin: 2px 0 0;
+  color: var(--ink-3);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
 @keyframes blink {
   0%,
   60%,
@@ -1292,6 +1300,117 @@ button:disabled {
   background: transparent;
   color: var(--status-warn-text);
   font-weight: 600;
+}
+
+/* STEP 1 자동화 영향 점수 — 판정색 없이 중립 톤으로 숫자만 */
+.risk-score {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 10px 0 4px;
+}
+
+.risk-score-num {
+  font-size: 2.2rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.risk-score-unit {
+  color: var(--ink-3);
+}
+
+.risk-formula {
+  margin: 0 0 12px;
+  color: var(--ink-2);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.risk-shares {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.risk-shares > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+}
+
+.risk-shares small {
+  color: var(--ink-3);
+  font-size: 0.75rem;
+}
+
+.risk-tasks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.risk-task-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.risk-task-name {
+  font-weight: 600;
+}
+
+.risk-task-why,
+.risk-task-ncs {
+  color: var(--ink-2);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.risk-task-ncs {
+  color: var(--ink-3);
+}
+
+.risk-sources {
+  margin-top: 12px;
+  font-size: 0.85rem;
+}
+
+.risk-sources ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
+@media (max-width: 480px) {
+  .risk-shares {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* 근거가 약한 추천 — 숨기지 않고 이유를 보여 사용자가 판단하게 한다 */
+.weak-evidence {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-left: 3px solid var(--status-warn);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--status-warn-text);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.weak-evidence ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
 }
 
 .job-foot {
@@ -2580,4 +2699,16 @@ button:disabled {
   .jm-cta {
     transition: none;
   }
+}
+
+/* 직무 카드의 AI 노출도 — 점수와 출처만, 판정색 없이 */
+.job-exposure {
+  margin: 6px 0 8px;
+}
+
+.job-exposure small {
+  display: block;
+  color: var(--ink-3);
+  font-size: 0.78rem;
+  line-height: 1.4;
 }

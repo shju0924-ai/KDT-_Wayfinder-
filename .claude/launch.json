@@ -4,13 +4,13 @@
     {
       "name": "frontend",
       "runtimeExecutable": "C:\\Program Files\\nodejs\\npm.cmd",
-      "runtimeArgs": ["run", "dev", "--prefix", "frontend"],
+      "runtimeArgs": ["run", "dev", "--prefix", "frontend", "--", "--host", "127.0.0.1"],
       "port": 5173
     },
     {
       "name": "backend",
-      "runtimeExecutable": "C:\\Users\\dkswj_j1dfctx\\Desktop\\Wayfinder\\backend\\.venv\\Scripts\\uvicorn.exe",
-      "runtimeArgs": ["app.main:app", "--reload", "--reload-dir", "backend/app", "--app-dir", "backend"],
+      "runtimeExecutable": "cmd.exe",
+      "runtimeArgs": ["/d", "/c", "scripts\\dev\\backend.cmd"],
       "port": 8000
     }
   ]

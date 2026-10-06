@@ -36,9 +36,7 @@ class JobPosting(Base):
     region: Mapped[str | None] = mapped_column(String(20), index=True, comment="seoul | gg | incheon")
     source_url: Mapped[str | None] = mapped_column(String(1000), nullable=True, comment="원본 채용공고 상세 URL")
     required_skills_text: Mapped[str] = mapped_column(Text, comment="요구역량 서술 (임베딩 입력)")
-    deadline: Mapped[str | None] = mapped_column(
-        String(10), nullable=True, comment="접수 마감일 YYYY-MM-DD (NULL=상시채용 등 마감일 없음)"
-    )
+    # 마감일은 수집 단계(collectors/filters.job_is_open)에서 마감된 공고를 거르는 데만 쓰고 저장하지 않는다
     embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True)
     collected_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

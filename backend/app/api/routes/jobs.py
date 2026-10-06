@@ -2,7 +2,7 @@
 
 인접 직무 전환형(adjacent):
     확정된 역량 프로필 → query 임베딩 → pgvector 유사 공고 top-k → 벡터 순위 상위부터
-    TOP_K 건씩 묶어 LLM이 수요 전망·전환 난이도·기여 역량 판정 → 격차 비율로 인접 후보만 남김.
+    TOP_K 건씩 묶어 LLM이 수요 전망·전환 난이도·기여 역량 판정 → 이어지는 역량이 충분한 후보만 남김.
     fit_score 는 역량↔공고 코사인 유사도를 백분율로 환산한 값.
 
 교육 후 직무 전환형(training) — 검색 방향을 뒤집는다:
@@ -11,19 +11,22 @@
     벡터가 후보로 올리지 못한다. 그래서 순서를 뒤집는다:
     LLM이 먼저 전이 가능한 새 직무를 제안 → 그 직무에 실제 훈련과정이 있는지(하드 게이트),
     실채용 수요가 있는지 데이터로 확인 → 근거 있는 제안만 카드로 노출.
-    fit_score 는 유사도가 아니라 '전이 비율'(요구 중 이미 이어지는 역량 비중)이다.
+    fit_score 는 역량 프로필 ↔ '직무 + 요구역량' 문장의 코사인 유사도(인접 트랙과 같은 척도).
 """
 import asyncio
+import logging
 import re
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
+from app.api.errors import upstream_error
 from app.db.session import get_db
 from app.schemas.career import JobMatch, JobSearchTrack, SkillProfile
-from app.services import embedding, llm
+from app.services import automation, embedding, llm
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 TOP_K = 5
 # 격차 판정에서 걸러질 후보를 감안해 판정 대상은 넉넉히 둔다 — TOP_K 건씩 묶어 최대 2회 호출.
@@ -31,11 +34,23 @@ TOP_K = 5
 SELECT_K = TOP_K * 2
 # 판정 전에 현재 직무·중복 직무를 걸러내므로 검색은 더 넉넉히 한다.
 SEARCH_K = TOP_K * 8
-# 역량 격차 비율(missing/required)이 이 값 이하면 인접 직무로 인정한다.
-# 0.4(요구역량 60%+ 보유)는 콜센터 상담원 페르소나 실측 3회 중 2회가 결과 0건이었다 —
-# LLM이 뽑는 required_skills가 공고별 세부 항목(예: '한글·엑셀 문서 작성')까지 담아 과증가하는
-# 경향이 있어, 실제로 인접한 직무조차 60% 문턱을 넘기 어렵다. 0.6은 3회 모두 1건 이상 통과했다.
-ADJACENT_GAP_RATIO = 0.6
+# 인접 판정: 공고 업무에 실제로 쓰이는 보유 역량이 이 수 이상이면 인접 직무로 인정한다.
+# 이전 기준(부족 역량 비율 ≤ 0.6)은 모델이 부족 역량을 몇 개 적느냐에 좌우됐다 — 4b→9b 교체만으로
+# MD 페르소나 결과가 5건→2건이 됐다(2개 이어짐·4개 부족 = 0.67 탈락). 이어지는 역량은 보유 역량
+# enum 안에서만 고르므로 모델이 바뀌어도 덜 흔들린다. 보유 역량이 이보다 적으면 전부 이어져야 한다.
+ADJACENT_MIN_MATCHED = 2
+# 엄격 기준 통과가 이보다 적으면 이어지는 역량 1개짜리 후보로 이만큼까지 채운다('근거 약함' 표시)
+ADJACENT_MIN_RESULTS = 3
+# 판정 근거로 붙일 같은 직무명 공고 수 (대표 공고 포함 최대 이만큼 + 1)
+SAMPLE_PER_TITLE = 4
+# 기계 조작·조립·운전·단순 노무 직무명 (KECO 표준명 끝말, 공백 제거 후 비교).
+# LLM은 범용 역량('프로젝트 관리')을 이어 붙여 생산관리 → 압연기 조작원을 냈고, 판정 필드로 물으면
+# 무역·물류 사무원까지 조작직으로 오판했다. 직무명은 표준 분류명이라 끝말 규칙이 더 정확하다.
+# '종사원'은 '기타 사무 지원 종사원'·'일선 관리 종사원'도 있어 '단순 종사원' 등만 잡는다.
+_SIMPLE_LABOR = re.compile(r"단순종사원|단순노무")
+_MANUAL_TITLE = re.compile(
+    r"(조작원|조립원|검사원|운전원|정비원|수리원|청소원|경비원|기능원|단순종사원|적재종사원|기능종사원)$"
+)
 
 # 교육 후 전환형: 제안 직무에 이 유사도 이상의 훈련과정이 있어야 '배울 곳이 실재'한다고 본다.
 # 실측(제안 직무명 vs training_courses top1): 실제 부트캠프 대상(웹 개발자·데이터 분석가 등)은
@@ -44,6 +59,20 @@ COURSE_MATCH_THRESHOLD = 0.55
 # 실채용 수요 확인 — 이 유사도 이상의 공고가 있으면 대표 공고로 첨부(링크). 공고 검색은
 # 변별력이 약해(무관한 직무명도 0.57+) 하드 게이트로 쓰지 않고 링크 첨부 여부에만 쓴다.
 JOB_DEMAND_THRESHOLD = 0.55
+
+# '근거 약함' 표시 기준 — 걸러내지 않고 카드에 이유만 붙인다.
+# 인접 적합도(역량↔공고 코사인×100) 실측: 무관에 가까운 웹 기획자 52.3·경영 기획 사무원 52.6(생산관리) /
+# 인접 직무 57~66, 생산·품질관리 사무원 54.3. 54 미만을 약함으로 본다.
+WEAK_FIT_SCORE = 54.0
+
+# 현재 직무명과 후보 직무명의 임베딩 유사도가 이 값 이상이면 '같은 직무'로 보고 뺀다.
+# 부분 문자열 비교는 '콜센터 상담원' ↔ '고객 상담원'처럼 표기만 다른 같은 직무를 못 잡았다.
+# 실측(bge-m3): 같은 직무 — 고객 상담원 0.83, 인바운드 상담원 0.73, 영업 및 마케팅 사무원 0.82,
+# 영업지원 사무원 0.87 / 전환 후보 — 영업 및 판매 관련 관리자 0.69, 마케팅·광고 사무원 0.70, 텔레마케터 0.54.
+SAME_JOB_SIMILARITY = 0.72
+
+# 프론트 SkillProfileCard 가 사용자가 직접 추가한 역량에 붙이는 분류
+USER_ADDED_CATEGORY = "직접 추가"
 
 TRACK_SEARCH_CONTEXT: dict[JobSearchTrack, str] = {
     "adjacent_transition": (
@@ -68,28 +97,83 @@ def _is_same_job(candidate: str, current: str) -> bool:
     return bool(a) and bool(b) and (b in a or a in b)
 
 
-def _gap_ratio(required_skills: list[str], missing_skills: list[str]) -> float:
-    """요구역량 대비 부족역량 비율 — 값이 낮을수록 지금 역량으로 바로 갈 수 있는 직무."""
-    if not required_skills:
-        return 0.0
-    return len(missing_skills) / len(required_skills)
+async def _drop_same_jobs(items: list[dict], current: str | None) -> list[dict]:
+    """현재 직무와 사실상 같은 직무(item['job_title'])를 뺀다 — 부분 일치 또는 직무명 임베딩 유사도.
+
+    LLM 판정(same_as_current)보다 앞에서 거르면 판정 호출에 같은 직무가 자리를 차지하지 않아,
+    로컬 모델에서 두 번째 판정 묶음 호출이 필요한 경우가 줄어든다.
+    """
+    if not current or not items:
+        return items
+    items = [it for it in items if not _is_same_job(it["job_title"], current)]
+    titles = list(dict.fromkeys(_base_title(it["job_title"]) or it["job_title"] for it in items))
+    try:
+        sims = dict(zip(titles, await embedding.similarities_to(_base_title(current) or current, titles)))
+    except Exception:
+        return items  # 임베딩 실패 시 부분 일치 필터 결과만으로 진행
+    return [
+        it for it in items
+        if sims.get(_base_title(it["job_title"]) or it["job_title"], 0.0) < SAME_JOB_SIMILARITY
+    ]
 
 
-def _is_adjacent_match(judged: dict) -> bool:
-    """인접 직무 전환형 판정 — 현재 직무와 다르고, 격차가 작고(요구역량 대부분 보유),
-    실제 이어지는 역량이 있어야 한다. 표기만 다른 같은 직무는 _is_same_job 이 못 잡아 LLM 판정으로 거른다."""
+def _group_key(row: dict) -> str:
+    """괄호 설명만 다른 같은 핵심 직무를 한 후보로 묶는 키."""
+    return _base_title(row["job_title"]).casefold() or row["job_title"].casefold()
+
+
+def _is_manual_title(title: str | None) -> bool:
+    """고용직업분류(KECO) 표준 직무명 기준 기계 조작·조립·운전·단순 노무 직무인지."""
+    return bool(title) and bool(_MANUAL_TITLE.search(_base_title(title)))
+
+
+def _drop_manual_downshift(items: list[dict], current: str | None) -> list[dict]:
+    """사무·관리·서비스 경력자에게 기계 조작·조립·운전·단순 노무 직무를 인접 후보로 내지 않는다.
+    현재 직무도 그런 직무면(예: CNC 선반 조작원) 같은 계열 이동은 그대로 둔다."""
+    if _is_manual_title(current):
+        # 조작직 경력자도 단순 노무직으로 내리지는 않는다(CNC 10년차 → '기타 제조 관련 단순 종사원' 실측)
+        if _SIMPLE_LABOR.search(_base_title(current or "")):
+            return items
+        kept = [it for it in items if not _SIMPLE_LABOR.search(_base_title(it["job_title"]))]
+    else:
+        kept = [it for it in items if not _is_manual_title(it["job_title"])]
+    if len(kept) < len(items):
+        logger.info("인접 후보 제외(조작·노무직) %d건", len(items) - len(kept))
+    return kept
+
+
+def _is_adjacent_match(judged: dict, skill_count: int) -> bool:
+    """인접 직무 전환형 판정 — 현재 직무와 다르고, 공고 업무에 실제로 쓰이는 보유 역량이 충분해야 한다.
+    표기만 다른 같은 직무는 _is_same_job 이 못 잡아 LLM 판정(same_as_current)으로 거른다."""
     if judged.get("same_as_current"):
         return False
-    gap_ratio = _gap_ratio(judged["required_skills"], judged["missing_skills"])
-    return gap_ratio <= ADJACENT_GAP_RATIO and len(judged["matched_skills"]) > 0
+    return len(judged["matched_skills"]) >= min(ADJACENT_MIN_MATCHED, skill_count)
 
 
 def _skill_search_text(profile: SkillProfile) -> str:
-    """역량명만으로는 도메인 맥락이 사라진다 — 근거 문장까지 합쳐 임베딩 입력을 만든다."""
+    """역량명만으로는 도메인 맥락이 사라진다 — 근거 문장까지 합쳐 임베딩 입력을 만든다.
+
+    사용자가 직접 추가한 역량은 근거 칸이 고정 안내 문구라 역량명만 쓴다 — 안내 문구가 검색어에 섞이면
+    역량과 무관한 방향으로 벡터가 끌린다."""
     return "\n".join(
-        f"{s.name} ({s.category}) — {s.evidence}" if s.evidence else s.name
+        f"{s.name} ({s.category}) — {s.evidence}"
+        if s.evidence and s.category != USER_ADDED_CATEGORY
+        else s.name
         for s in profile.skills
     )
+
+
+def _dedupe_targets(targets: list[dict]) -> list[dict]:
+    """같은 핵심 직무명 제안은 첫 번째만 남긴다. LLM이 같은 직무를 두 번 내면 카드가 겹치고,
+    프론트는 직무명으로 선택 상태를 구분해 둘 다 선택된 것처럼 보였다."""
+    seen: set[str] = set()
+    out = []
+    for t in targets:
+        key = _group_key(t)
+        if key not in seen:
+            seen.add(key)
+            out.append(t)
+    return out
 
 
 async def _match_adjacent_transition(
@@ -105,18 +189,16 @@ async def _match_adjacent_transition(
             search_context=TRACK_SEARCH_CONTEXT["adjacent_transition"],
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"직무 검색 실패: {e}") from e
+        raise upstream_error("직무 검색 실패", e) from e
 
-    if exclude_job:
-        rows = [r for r in rows if not _is_same_job(r["job_title"], exclude_job)]
+    rows = _drop_manual_downshift(await _drop_same_jobs(rows, exclude_job), exclude_job)
     if not rows:
         return []
 
     # 괄호 설명만 다른 같은 핵심 직무는 하나의 후보로 묶고, 대표 공고와 근거 수를 남긴다.
     grouped_rows: dict[str, list[dict]] = {}
     for row in rows:
-        group_key = _base_title(row["job_title"]).casefold() or row["job_title"].casefold()
-        grouped_rows.setdefault(group_key, []).append(row)
+        grouped_rows.setdefault(_group_key(row), []).append(row)
 
     groups = sorted(
         grouped_rows.values(),
@@ -131,15 +213,32 @@ async def _match_adjacent_transition(
             key=lambda row: row.get("ranking_similarity", row["similarity"]),
         ).copy()
         representative["posting_count"] = len(group)
-        # 묶인 공고 여러 건의 발췌를 합쳐 요구역량 판단 근거를 넓힌다
-        representative["snippet"] = "\n".join(
-            f"- {row['job_title']}: {row.get('snippet') or ''}" for row in group[:3]
-        )
+        # 카드에 보일 근거는 대표 공고 원문 발췌 — 판정용 발췌(여러 공고)는 아래에서 따로 만든다
+        representative["snippet_raw"] = representative.get("snippet") or ""
         representatives.append(representative)
 
-    # 벡터 유사도 순위 상위부터 TOP_K 건씩 묶어 판정하고, 인접 판정(격차 비율)을 통과한 것만 남긴다.
-    matches: list[JobMatch] = []
+    # 대표 공고 한 건만 보면 그 회사만의 요구('영문 이메일', '운전면허')가 부족 역량이 된다.
+    # 같은 직무명 공고를 DB에서 몇 건 더 붙여, 판정이 직무 공통 요구를 가려내게 한다.
     candidates = representatives[:SELECT_K]
+    group_titles = {id(r): {row["job_title"] for row in grouped_rows[_group_key(r)]} for r in candidates}
+    try:
+        samples = await embedding.run_db(
+            embedding.sample_postings_by_title,
+            [t for titles in group_titles.values() for t in titles],
+            SAMPLE_PER_TITLE,
+        )
+    except Exception:
+        samples = {}
+    for rep in candidates:
+        extra = [s for t in group_titles[id(rep)] for s in samples.get(t, [])]
+        snippets = [s for s in dict.fromkeys([rep.get("snippet_raw") or "", *extra]) if s.strip()]
+        rep["snippet"] = "\n".join(f"- {s}" for s in snippets)[: llm.JUDGE_SNIPPET_CHARS]
+
+    # 벡터 유사도 순위 상위부터 TOP_K 건씩 묶어 판정하고, 인접 판정을 통과한 것만 남긴다.
+    matches: list[JobMatch] = []
+    titles_en: list[str | None] = []  # 카드별 영문 표준 직업명 — AI 노출도 매칭용
+    # 이어지는 역량이 1개뿐인 후보 — 엄격 기준 결과가 너무 적을 때만 '근거 약함'으로 채운다
+    fallback: list[tuple[dict, dict]] = []
     for start in range(0, len(candidates), TOP_K):
         if len(matches) == TOP_K:
             break
@@ -150,17 +249,57 @@ async def _match_adjacent_transition(
             # LLM 자체가 죽은 경우(키 오류·Ollama 미기동 등) '결과 0건'으로 숨기지 않는다
             if matches:
                 break
-            raise HTTPException(status_code=502, detail=f"직무 판정 실패: {e}") from e
+            raise upstream_error("직무 판정 실패", e) from e
         for row, judged in zip(batch, judgements):
             if len(matches) == TOP_K:
                 break
-            if not _is_adjacent_match(judged):
+            if not _is_adjacent_match(judged, len(skill_names)):
+                if not judged.get("same_as_current") and judged["matched_skills"]:
+                    fallback.append((row, judged))
+                logger.info(
+                    "인접 후보 탈락 %s: same=%s matched=%d missing=%d",
+                    row["job_title"], judged.get("same_as_current"),
+                    len(judged["matched_skills"]), len(judged["missing_skills"]),
+                )
                 continue
             matches.append(_adjacent_job_match(row, judged))
+            titles_en.append(judged.get("occupation_title_en"))
+
+    # 전문 기술 직무(웹 퍼블리셔 등)는 LLM이 공고마다 이어지는 역량을 1개만 고르는 일이 많아
+    # 결과가 0건이 됐다. 빈 화면보다, 이유를 밝힌 약한 후보를 보여주고 사용자가 고르게 한다.
+    for row, judged in fallback[: max(0, ADJACENT_MIN_RESULTS - len(matches))]:
+        match = _adjacent_job_match(row, judged)
+        match.weak_reasons.insert(0, "보유 역량 중 이 직무 업무와 이어지는 것이 1개뿐입니다.")
+        matches.append(match)
+        titles_en.append(judged.get("occupation_title_en"))
+    return await _with_ai_exposure(matches, titles_en)
+
+
+async def _with_ai_exposure(matches: list[JobMatch], titles_en: list[str | None]) -> list[JobMatch]:
+    """카드마다 공개 직업 AI 노출도(ILO·Anthropic)를 붙인다 — 점수와 매칭 직업명·출처만, 판정 없음.
+    매칭 자료가 없거나 조회가 실패해도 카드는 그대로 낸다(참고 정보)."""
+    try:
+        exposures = await embedding.run_db(automation.occupation_exposures, titles_en)
+    except Exception as e:
+        logger.warning("직무별 AI 노출도 조회 실패: %r", e)
+        return matches
+    for match, (score, sources) in zip(matches, exposures):
+        match.ai_exposure_score = score
+        match.ai_exposure_sources = sources
     return matches
 
 
+def _adjacent_weak_reasons(fit: float, judged: dict) -> list[str]:
+    """인접 직무 카드의 근거가 약한 이유. 카드는 숨기지 않고 이유만 붙인다 — 판단은 사용자 몫.
+    전환 난이도 '높음'은 카드에 이미 태그로 보이므로 이유로 중복하지 않는다(실측 38장 중 13장에 붙어 표시가 무의미해졌다)."""
+    reasons = []
+    if fit < WEAK_FIT_SCORE:
+        reasons.append(f"내 역량과 공고 내용의 유사도가 낮은 편입니다 (적합도 {fit}).")
+    return reasons
+
+
 def _adjacent_job_match(row: dict, judged: dict) -> JobMatch:
+    fit = round(row["similarity"] * 100, 1)
     return JobMatch(
         posting_id=row.get("posting_id"),
         posting_count=row["posting_count"],
@@ -168,13 +307,14 @@ def _adjacent_job_match(row: dict, judged: dict) -> JobMatch:
         company=row.get("company"),
         region=row.get("region"),
         source_url=row.get("source_url"),
-        requirement_excerpt=row.get("snippet"),
-        fit_score=round(row["similarity"] * 100, 1),
+        requirement_excerpt=row.get("snippet_raw") or row.get("snippet"),
+        fit_score=fit,
         demand_outlook=judged["demand_outlook"],
         transition_difficulty=judged["transition_difficulty"],
         matched_skills=judged["matched_skills"],
         required_skills=judged["required_skills"],
         missing_skills=judged["missing_skills"],
+        weak_reasons=_adjacent_weak_reasons(fit, judged),
     )
 
 
@@ -184,13 +324,14 @@ async def _match_training_transition(
     """교육 후 직무 전환형 — LLM이 제안한 새 직무를 훈련과정·채용 데이터로 검증한다."""
     profile_lines = [line for line in _skill_search_text(profile).split("\n") if line.strip()]
     try:
-        targets = await llm.suggest_training_targets(profile_lines, exclude_job)
+        targets = await llm.suggest_training_targets(
+            profile_lines, exclude_job, [s.name for s in profile.skills]
+        )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"전환 직무 제안 실패: {e}") from e
+        raise upstream_error("전환 직무 제안 실패", e) from e
 
-    # LLM이 현재 직무와 같은 직무군을 실수로 제안하면 제외 (이 트랙은 '새 분야'가 핵심)
-    if exclude_job:
-        targets = [t for t in targets if not _is_same_job(t["job_title"], exclude_job)]
+    # LLM이 현재 직무와 같은 직무를 실수로 제안하면 제외 (이 트랙은 '새 분야'가 핵심)
+    targets = await _drop_same_jobs(_dedupe_targets(targets), exclude_job)
     if not targets:
         return []
 
@@ -207,13 +348,27 @@ async def _match_training_transition(
     # 검증 검색이 전부 실패했다면(DB 연결 끊김 등) '결과 0건'으로 숨기지 않는다
     errors = [r for r in verified if isinstance(r, Exception)]
     if errors and len(errors) == len(verified):
-        raise HTTPException(status_code=502, detail=f"훈련과정·채용 검증 실패: {errors[0]}")
+        raise upstream_error("훈련과정·채용 검증 실패", errors[0]) from errors[0]
+
+    # 적합도: 사용자 역량 프로필과 '직무 + 요구역량' 문장의 벡터 유사도 — 인접 트랙(프로필 ↔ 공고)과 같은 척도.
+    # 이전에는 '이어지는 역량 수 / 요구역량 수'였는데, 모델이 거의 항상 2개·3개를 내 모든 카드가 40.0이 됐다.
+    ok = [r for r in verified if not isinstance(r, Exception)]
+    try:
+        vecs = await embedding.embed_queries(
+            [_skill_search_text(profile)]
+            + [
+                f"{t['job_title']}\n요구 역량: {', '.join(t['transferable_skills'] + t['training_needs'])}"
+                for t, _, _ in ok
+            ]
+        )
+        fits = [round(sum(a * b for a, b in zip(vecs[0], v)) * 100, 1) for v in vecs[1:]]
+    except Exception:
+        fits = [None] * len(ok)
+    verified = sorted(zip(ok, fits), key=lambda x: x[1] or 0, reverse=True)
 
     matches: list[JobMatch] = []
-    for result in verified:
-        if isinstance(result, Exception):
-            continue
-        target, courses, jobs = result
+    titles_en: list[str | None] = []
+    for (target, courses, jobs), fit in verified:
         # 하드 게이트: 실제로 배울 곳(훈련과정)이 있는 직무만 남긴다 — 근거 없는 제안 차단
         if not courses or courses[0]["similarity"] < COURSE_MATCH_THRESHOLD:
             continue
@@ -224,9 +379,11 @@ async def _match_training_transition(
         training = target["training_needs"]
         # 요구역량 = 이어지는 보유 역량 + 새로 배울 역량 (직무가 필요로 하는 전체)
         required = transferable + [x for x in training if x not in transferable]
-        # fit_score 를 벡터 유사도로 두면 이 트랙은 태생적으로 유사도가 낮아 카드마다 적합도가
-        # 바닥으로 뜨는 모순이 생긴다. 대신 '전이 비율' — 요구역량 중 이미 이어지는 비중 — 을 쓴다.
-        fit = round(len(transferable) / (len(required) or 1) * 100, 1)
+        if fit is None:  # 임베딩 실패 시에만 '전이 비율'(이어지는 역량 수 / 요구역량 수)로 대신한다
+            fit = round(len(transferable) / (len(required) or 1) * 100, 1)
+        weak = []
+        if posting is None:
+            weak.append("이 직무명으로 확인된 실제 채용공고가 없어 수요가 데이터로 확인되지 않았습니다.")
 
         matches.append(
             JobMatch(
@@ -244,11 +401,13 @@ async def _match_training_transition(
                 matched_skills=transferable,
                 required_skills=required,
                 missing_skills=training,
+                weak_reasons=weak,
             )
         )
+        titles_en.append(target.get("occupation_title_en"))
         if len(matches) == TOP_K:
             break
-    return matches
+    return await _with_ai_exposure(matches, titles_en)
 
 
 @router.post("/match", response_model=list[JobMatch], summary="역량 프로필 → 다음 직무 매핑")
@@ -258,9 +417,13 @@ async def match_jobs(
     exclude_job: str | None = None,
     search_track: JobSearchTrack = "adjacent_transition",
 ) -> list[JobMatch]:
-    """선택한 탐색 경로에 맞춰 다음 직무 후보를 찾고 현재 직무는 제외한다."""
+    """선택한 탐색 경로에 맞춰 다음 직무 후보를 찾고 현재 직무는 제외한다.
+
+    exclude_job 이 없으면 STEP 2가 경력 서사에서 뽑은 profile.current_job_title 로 제외한다
+    (이력서·자유 텍스트 경로는 사용자가 직무명을 따로 입력하지 않는다)."""
     if not profile.skills:
         return []
+    exclude_job = exclude_job or profile.current_job_title
     if search_track == "training_transition":
         return await _match_training_transition(profile, db, exclude_job)
     return await _match_adjacent_transition(profile, db, exclude_job)

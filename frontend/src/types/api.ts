@@ -30,6 +30,46 @@ export interface SurveyCareer {
   career_text: string;
 }
 
+// ── STEP 1. 자동화 영향 진단 ───────────────────────────
+/** 경력 서사에서 추출한 업무와 업무별 AI 영향 */
+export interface AutomationTask {
+  name: string;
+  /** 직무에서 차지하는 비중 (0~100) */
+  share_percent: number;
+  automation_score: number;
+  ai_assistance_score: number;
+  effect: "automation" | "augmentation" | "human";
+  rationale: string;
+  ncs_code?: string | null;
+  ncs_unit?: string | null;
+}
+
+/** 진단에 사용한 데이터 또는 방법론 출처 */
+export interface RiskSource {
+  source: string;
+  label: string;
+  url: string;
+  score?: number | null;
+  note?: string | null;
+}
+
+/** 점수와 산출 근거만 담는다 — 낮음/보통/높음 같은 판정은 내지 않는다 */
+export interface RiskDiagnosis {
+  job_title: string;
+  /** 자동화 위험도 (0~100) */
+  risk_score: number;
+  /** 점수 산출 방식 설명 */
+  rationale: string;
+  task_based_score: number;
+  automation_share: number;
+  augmentation_share: number;
+  human_centered_share: number;
+  /** 근거 충족도 (0~100) */
+  confidence: number;
+  tasks: AutomationTask[];
+  sources: RiskSource[];
+}
+
 // ── STEP 2. 역량 프로필 ────────────────────────────────
 export interface SkillItem {
   name: string;
@@ -40,6 +80,8 @@ export interface SkillItem {
 
 export interface SkillProfile {
   skills: SkillItem[];
+  /** 현재(최근) 직무명 — 사용자 입력값 또는 경력 서사에서 추출. STEP 3 같은 직무 제외에 사용 */
+  current_job_title?: string | null;
 }
 
 // ── STEP 3. 인접 직무 탐색 ─────────────────────────────
@@ -64,6 +106,12 @@ export interface JobMatch {
   required_skills: string[];
   /** 요구역량 중 아직 없는 역량 */
   missing_skills: string[];
+  /** 추천 근거가 약한 이유 — 비어 있으면 근거 충분 */
+  weak_reasons: string[];
+  /** 이 직무의 공개 AI 노출도 참고 점수(출처 평균). 판정 없음. 매칭 자료가 없으면 null */
+  ai_exposure_score?: number | null;
+  /** 노출도 출처별 점수와 매칭된 직업명 */
+  ai_exposure_sources: RiskSource[];
 }
 
 // ── STEP 4. 학습 로드맵 ────────────────────────────────
@@ -80,10 +128,13 @@ export interface HrdCourse {
 export interface RoadmapItem {
   skill_gap: string;
   learning_item: string;
+  /** 예상 소요 기간(주). 0이면 훈련과정이 없어 기간 미정 */
   duration_weeks: number;
   resources: string[];
   source: string;
   course?: HrdCourse | null;
+  /** 과정과 역량 격차의 연관 근거가 약한 이유 */
+  weak_reason?: string | null;
 }
 
 export interface LearningRoadmap {
