@@ -18,6 +18,7 @@ export default function SkillProfileCard({ initial, locked, onConfirm }: Props) 
   const add = () => {
     const name = draft.trim();
     if (!name || skills.some((s) => s.name === name)) return;
+    // 분류 "직접 추가"는 백엔드 jobs.py USER_ADDED_CATEGORY 와 같아야 한다 — 이 역량은 근거 문구를 검색어에서 뺀다
     setSkills((s) => [
       ...s,
       { name, category: "직접 추가", evidence: "사용자가 직접 추가한 역량", confirmed: false },

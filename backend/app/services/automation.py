@@ -204,7 +204,11 @@ def _ncs_unit_index(db: Session):
         if not embedding.settings.embedding_api_url:
             return None
         try:
-            units = [u for u in db.scalars(select(NcsUnit)).all() if "구버전" not in u.unit_name]
+            # 순서를 고정해야 아래 캐시 키가 매번 같다 — ORDER BY 가 없으면 행 순서가 바뀌어 색인을 다시 만들었다
+            units = [
+                u for u in db.scalars(select(NcsUnit).order_by(NcsUnit.ncs_code)).all()
+                if "구버전" not in u.unit_name
+            ]
         except SQLAlchemyError:
             db.rollback()
             return None

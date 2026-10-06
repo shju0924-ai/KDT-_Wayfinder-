@@ -8,6 +8,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
+from app.api.errors import upstream_error
 from app.db.session import get_db
 from app.schemas.career import CareerInput, ParsedResume, RiskDiagnosis, SurveyCareer, SurveyInput
 from app.services import automation
@@ -68,4 +69,4 @@ async def diagnose_risk(career: CareerInput, db: Session = Depends(get_db)) -> R
     try:
         return await automation.diagnose(db, career.raw_text, career.current_job_title)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"자동화 영향 진단 실패: {e!r}") from e
+        raise upstream_error("자동화 영향 진단 실패", e) from e

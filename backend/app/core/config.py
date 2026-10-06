@@ -13,6 +13,8 @@ class Settings(BaseSettings):
 
     app_env: str = "dev"
     database_url: str = "postgresql+psycopg://wayfinder:wayfinder@localhost:5432/wayfinder"
+    # DB 연결 시도 상한(초). localhost 는 ::1·127.0.0.1 을 차례로 시도하므로 최악은 이 값의 2배
+    db_connect_timeout_seconds: int = 5
 
     # LLM 프로바이더: claude(Anthropic API) 또는 ollama(로컬 모델, 키 불필요)
     # 임베딩은 어느 쪽이든 로컬 모델(BAAI/bge-m3)이라 키가 필요 없음

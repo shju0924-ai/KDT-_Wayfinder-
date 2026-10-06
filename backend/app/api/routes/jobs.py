@@ -17,9 +17,10 @@ import asyncio
 import logging
 import re
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
+from app.api.errors import upstream_error
 from app.db.session import get_db
 from app.schemas.career import JobMatch, JobSearchTrack, SkillProfile
 from app.services import automation, embedding, llm
@@ -69,6 +70,9 @@ WEAK_FIT_SCORE = 54.0
 # 실측(bge-m3): 같은 직무 — 고객 상담원 0.83, 인바운드 상담원 0.73, 영업 및 마케팅 사무원 0.82,
 # 영업지원 사무원 0.87 / 전환 후보 — 영업 및 판매 관련 관리자 0.69, 마케팅·광고 사무원 0.70, 텔레마케터 0.54.
 SAME_JOB_SIMILARITY = 0.72
+
+# 프론트 SkillProfileCard 가 사용자가 직접 추가한 역량에 붙이는 분류
+USER_ADDED_CATEGORY = "직접 추가"
 
 TRACK_SEARCH_CONTEXT: dict[JobSearchTrack, str] = {
     "adjacent_transition": (
@@ -147,11 +151,29 @@ def _is_adjacent_match(judged: dict, skill_count: int) -> bool:
 
 
 def _skill_search_text(profile: SkillProfile) -> str:
-    """역량명만으로는 도메인 맥락이 사라진다 — 근거 문장까지 합쳐 임베딩 입력을 만든다."""
+    """역량명만으로는 도메인 맥락이 사라진다 — 근거 문장까지 합쳐 임베딩 입력을 만든다.
+
+    사용자가 직접 추가한 역량은 근거 칸이 고정 안내 문구라 역량명만 쓴다 — 안내 문구가 검색어에 섞이면
+    역량과 무관한 방향으로 벡터가 끌린다."""
     return "\n".join(
-        f"{s.name} ({s.category}) — {s.evidence}" if s.evidence else s.name
+        f"{s.name} ({s.category}) — {s.evidence}"
+        if s.evidence and s.category != USER_ADDED_CATEGORY
+        else s.name
         for s in profile.skills
     )
+
+
+def _dedupe_targets(targets: list[dict]) -> list[dict]:
+    """같은 핵심 직무명 제안은 첫 번째만 남긴다. LLM이 같은 직무를 두 번 내면 카드가 겹치고,
+    프론트는 직무명으로 선택 상태를 구분해 둘 다 선택된 것처럼 보였다."""
+    seen: set[str] = set()
+    out = []
+    for t in targets:
+        key = _group_key(t)
+        if key not in seen:
+            seen.add(key)
+            out.append(t)
+    return out
 
 
 async def _match_adjacent_transition(
@@ -167,7 +189,7 @@ async def _match_adjacent_transition(
             search_context=TRACK_SEARCH_CONTEXT["adjacent_transition"],
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"직무 검색 실패: {e!r}") from e
+        raise upstream_error("직무 검색 실패", e) from e
 
     rows = _drop_manual_downshift(await _drop_same_jobs(rows, exclude_job), exclude_job)
     if not rows:
@@ -227,7 +249,7 @@ async def _match_adjacent_transition(
             # LLM 자체가 죽은 경우(키 오류·Ollama 미기동 등) '결과 0건'으로 숨기지 않는다
             if matches:
                 break
-            raise HTTPException(status_code=502, detail=f"직무 판정 실패: {e!r}") from e
+            raise upstream_error("직무 판정 실패", e) from e
         for row, judged in zip(batch, judgements):
             if len(matches) == TOP_K:
                 break
@@ -306,10 +328,10 @@ async def _match_training_transition(
             profile_lines, exclude_job, [s.name for s in profile.skills]
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"전환 직무 제안 실패: {e!r}") from e
+        raise upstream_error("전환 직무 제안 실패", e) from e
 
     # LLM이 현재 직무와 같은 직무를 실수로 제안하면 제외 (이 트랙은 '새 분야'가 핵심)
-    targets = await _drop_same_jobs(targets, exclude_job)
+    targets = await _drop_same_jobs(_dedupe_targets(targets), exclude_job)
     if not targets:
         return []
 
@@ -326,7 +348,7 @@ async def _match_training_transition(
     # 검증 검색이 전부 실패했다면(DB 연결 끊김 등) '결과 0건'으로 숨기지 않는다
     errors = [r for r in verified if isinstance(r, Exception)]
     if errors and len(errors) == len(verified):
-        raise HTTPException(status_code=502, detail=f"훈련과정·채용 검증 실패: {errors[0]}")
+        raise upstream_error("훈련과정·채용 검증 실패", errors[0]) from errors[0]
 
     # 적합도: 사용자 역량 프로필과 '직무 + 요구역량' 문장의 벡터 유사도 — 인접 트랙(프로필 ↔ 공고)과 같은 척도.
     # 이전에는 '이어지는 역량 수 / 요구역량 수'였는데, 모델이 거의 항상 2개·3개를 내 모든 카드가 40.0이 됐다.

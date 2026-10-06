@@ -10,7 +10,13 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-engine = create_engine(settings.database_url, pool_pre_ping=True)
+# connect_timeout: DB가 꺼져 있으면 연결 시도가 실패하지 않고 수 분 이상 멈췄다(Windows에서
+# 닫힌 포트로의 연결이 거부되지 않고 응답 없이 대기). 몇 초 안에 실패시켜 502로 알린다.
+engine = create_engine(
+    settings.database_url,
+    pool_pre_ping=True,
+    connect_args={"connect_timeout": settings.db_connect_timeout_seconds},
+)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 

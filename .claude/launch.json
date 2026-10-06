@@ -9,8 +9,8 @@
     },
     {
       "name": "backend",
-      "runtimeExecutable": "D:\\KDT 해커톤\\KDT-_Wayfinder-\\backend\\.venv\\Scripts\\uvicorn.exe",
-      "runtimeArgs": ["app.main:app", "--reload", "--reload-dir", "backend/app", "--app-dir", "backend"],
+      "runtimeExecutable": "cmd.exe",
+      "runtimeArgs": ["/d", "/c", "scripts\\dev\\backend.cmd"],
       "port": 8000
     }
   ]

@@ -8,10 +8,11 @@
 """
 import asyncio
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.api.errors import upstream_error
 from app.db.session import get_db
 from app.schemas.career import LearningRoadmap, RoadmapItem, SkillProfile
 from app.services import embedding, llm
@@ -55,6 +56,6 @@ async def generate_roadmap(req: RoadmapRequest, db: Session = Depends(get_db)) -
         }
         items = await llm.build_roadmap_items(gaps, req.target_job, courses_by_gap)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"로드맵 생성 실패: {e!r}") from e
+        raise upstream_error("로드맵 생성 실패", e) from e
 
     return LearningRoadmap(target_job=req.target_job, items=[RoadmapItem(**i) for i in items])
