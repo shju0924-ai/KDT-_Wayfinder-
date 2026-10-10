@@ -6,6 +6,12 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+ResumeFileType = Literal["pdf", "docx", "hwp", "hwpx"]
+TaskEffect = Literal["automation", "augmentation", "human"]
+Region = Literal["seoul", "gg", "incheon"]
+DemandOutlook = Literal["증가", "유지", "감소"]
+TransitionDifficulty = Literal["낮음", "보통", "높음"]
+
 
 # ── STEP 1. 경력 입력·진단 ──────────────────────────────────
 class CareerInput(BaseModel):
@@ -18,7 +24,7 @@ class ParsedResume(BaseModel):
     """업로드한 이력서에서 추출한 진단용 텍스트."""
 
     filename: str
-    file_type: str
+    file_type: ResumeFileType
     text: str
     char_count: int = Field(..., ge=0)
     warnings: list[str] = Field(default_factory=list)
@@ -48,7 +54,7 @@ class AutomationTask(BaseModel):
     share_percent: float = Field(..., ge=0, le=100, description="직무에서 차지하는 비중")
     automation_score: float = Field(..., ge=0, le=100)
     ai_assistance_score: float = Field(..., ge=0, le=100)
-    effect: str = Field(..., description="automation | augmentation | human")
+    effect: TaskEffect = Field(..., description="업무의 주효과 — 자동화 | AI 보조 | 사람 중심")
     rationale: str
     ncs_code: str | None = None
     ncs_unit: str | None = None
@@ -115,12 +121,12 @@ class JobMatch(BaseModel):
     posting_count: int = Field(1, ge=1, description="같은 직무로 묶인 공고 수")
     job_title: str
     company: str | None = Field(None, description="공고를 낸 회사명")
-    region: str | None = Field(None, description="공고 지역: seoul | gg | incheon")
+    region: Region | None = Field(None, description="공고 지역")
     source_url: str | None = Field(None, description="원본 채용공고 상세 페이지 URL")
     requirement_excerpt: str | None = Field(None, description="요구역량 판단 근거가 된 공고 발췌")
     fit_score: float = Field(..., ge=0, le=100, description="역량 적합도 (벡터 유사도 기반)")
-    demand_outlook: str = Field(..., description="수요 전망")
-    transition_difficulty: str = Field(..., description="전환 난이도: 낮음 | 보통 | 높음")
+    demand_outlook: DemandOutlook = Field(..., description="수요 전망")
+    transition_difficulty: TransitionDifficulty = Field(..., description="전환 난이도")
     matched_skills: list[str] = Field(default_factory=list, description="적합 판정에 기여한 보유 역량")
     required_skills: list[str] = Field(default_factory=list, description="공고에서 확인된 핵심 요구역량")
     missing_skills: list[str] = Field(default_factory=list, description="요구역량 중 아직 없는 역량")

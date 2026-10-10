@@ -7,6 +7,7 @@ LLM·임베딩·DB가 모두 떠 있어야 한다(런팟 터널 또는 로컬). 
     python -m scripts.e2e_eval --set v2     # 두 번째 페르소나 세트
     python -m scripts.e2e_eval --only md    # 하나만
     python -m scripts.e2e_eval --json out.json
+    python -m scripts.e2e_eval --set all --sequential   # 로컬 CPU — 한 명씩, 요청도 하나씩
 
 LLM 캐시를 거치면 실제 품질·시간이 아니라 이전 결과를 보게 되므로, 이 스크립트는 새 임시 캐시를 쓴다.
 """
@@ -121,7 +122,15 @@ class _Collect(logging.Handler):
         self.lines.append(record.getMessage())
 
 
-async def run_persona(c: httpx.AsyncClient, key: str, survey: dict) -> dict:
+async def _gather(sequential: bool, *coros):
+    """병렬(GPU) 또는 순차(로컬 CPU) 실행. 로컬 Ollama 는 요청을 하나씩 처리해, 동시에 보내면
+    대기열에서 기다린 시간까지 호출 타임아웃(1800초)에 걸려 뒤쪽 요청이 502로 끝난다."""
+    if not sequential:
+        return await asyncio.gather(*coros)
+    return [await co for co in coros]
+
+
+async def run_persona(c: httpx.AsyncClient, key: str, survey: dict, sequential: bool = False) -> dict:
     t0 = time.perf_counter()
     times: dict[str, float] = {}
 
@@ -139,16 +148,18 @@ async def run_persona(c: httpx.AsyncClient, key: str, survey: dict) -> dict:
         job_title = survey["job_title"]
     career_input = {"raw_text": career, "current_job_title": job_title}
     # STEP 1 진단과 STEP 2 역량 분해는 같은 경력 서사만 쓰므로 동시에 보낸다
-    risk, profile = await asyncio.gather(
+    risk, profile = await _gather(
+        sequential,
         timed("s1_risk", c.post("/api/diagnosis/risk", json=career_input)),
         timed("s2", c.post("/api/profile", json=career_input)),
     )
     # 두 트랙·로드맵은 서로 독립 — 동시에 보내 GPU 병렬 처리(OLLAMA_NUM_PARALLEL)를 쓴다
-    adjacent, training = await asyncio.gather(
+    adjacent, training = await _gather(
+        sequential,
         timed("s3_adj", c.post("/api/jobs/match?search_track=adjacent_transition", json=profile)),
         timed("s3_trn", c.post("/api/jobs/match?search_track=training_transition", json=profile)),
     )
-    roadmaps = await asyncio.gather(*(
+    roadmaps = await _gather(sequential, *(
         timed(f"s4_{i}", c.post("/api/roadmap", json={"profile": profile, "target_job": job["job_title"],
                                                       "missing_skills": job.get("missing_skills") or []}))
         for i, job in enumerate(adjacent[:1] + training[:1])
@@ -191,6 +202,7 @@ async def main() -> None:
     ap.add_argument("--set", choices=["v1", "v2", "all"], default="v1", help="페르소나 세트 (all = 8명)")
     ap.add_argument("--only")
     ap.add_argument("--json")
+    ap.add_argument("--sequential", action="store_true", help="페르소나·요청을 하나씩 실행 (로컬 CPU용)")
     args = ap.parse_args()
 
     personas = {"v1": PERSONAS, "v2": PERSONAS_V2, "all": {**PERSONAS, **PERSONAS_V2}}[args.set]
@@ -200,9 +212,24 @@ async def main() -> None:
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t", timeout=1800) as c:
         t0 = time.perf_counter()
-        results = await asyncio.gather(*(
-            run_persona(c, key, survey) for key, survey in personas.items() if not args.only or key == args.only
-        ))
+        selected = [(k, v) for k, v in personas.items() if not args.only or k == args.only]
+
+        async def safe_run(key: str, survey: dict) -> dict | None:
+            # 한 명이 실패해도 나머지 결과는 남긴다 — 로컬에서는 전체가 몇 시간짜리다
+            try:
+                res = await run_persona(c, key, survey, args.sequential)
+            except Exception as e:
+                print(f"[실패] {key}: {e!r}", flush=True)
+                return None
+            print(f"[완료] {key} {res['total']}s", flush=True)
+            return res
+
+        if args.sequential:
+            outcomes = [await safe_run(k, v) for k, v in selected]
+        else:
+            outcomes = await asyncio.gather(*(safe_run(k, v) for k, v in selected))
+        results = [r for r in outcomes if r is not None]
+        failed = [k for (k, _), r in zip(selected, outcomes) if r is None]
         for res in results:
             print(f"\n##### {res['persona']}  ({res['total']}s) {res['times']}")
             print("현재 직무:", res["current_job"], "| 역량:", res["skills"])
@@ -220,6 +247,8 @@ async def main() -> None:
         for line in collector.lines:
             print("log:", line)
         print(f"\n전체 {time.perf_counter() - t0:.1f}s")
+        if failed:
+            print("실패한 페르소나:", ", ".join(failed))
 
     print("\n| 페르소나 | 시간(s) | 진단 점수 | 인접 | 훈련 | 로드맵 과정 연결 | 직무 노출도 | 근거 약함(직무/과정) | 한자 |")
     print("|---|---|---|---|---|---|---|---|---|")

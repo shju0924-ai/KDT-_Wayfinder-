@@ -1,0 +1,4 @@
+# 테스트·린트용 — 실행에는 필요 없다
+-r requirements.txt
+pytest==9.1.1
+ruff==0.17.0

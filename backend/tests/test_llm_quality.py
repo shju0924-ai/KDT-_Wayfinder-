@@ -150,6 +150,27 @@ def test_llm_cache_roundtrip(monkeypatch, tmp_path):
     monkeypatch.setattr(llm, "_cache_conn", None)
 
 
+def test_llm_cache_expires_after_ttl(monkeypatch, tmp_path):
+    """캐시 값에는 경력 서사에서 뽑은 근거가 들어간다 — 보존 기한이 지나면 읽지 않고 지운다."""
+    monkeypatch.setattr(settings, "llm_cache_path", str(tmp_path / "cache.sqlite"))
+    monkeypatch.setattr(settings, "llm_cache_ttl_hours", 1)
+    monkeypatch.setattr(llm, "_cache_conn", None)
+    now = [1_000_000.0]
+    monkeypatch.setattr(llm.time, "time", lambda: now[0])
+
+    llm._cache_put("k", "v")
+    assert llm._cache_get("k") == "v"
+    now[0] += 3601
+    assert llm._cache_get("k") is None
+
+    # 다시 열 때 기한 지난 항목은 디스크에서도 지워진다
+    llm._cache_conn.close()
+    monkeypatch.setattr(llm, "_cache_conn", None)
+    assert llm._cache_db().execute("SELECT count(*) FROM llm_cache").fetchone()[0] == 0
+    llm._cache_conn.close()
+    monkeypatch.setattr(llm, "_cache_conn", None)
+
+
 
 def test_manual_downshift_uses_keco_title_suffix():
     """사무·관리 경력자에게 조작·조립·운전·단순 노무 직무는 빼고, 사무 '종사원'은 남긴다."""
@@ -238,6 +259,7 @@ def test_traits_are_not_skills():
 def test_occupation_exposure_scores_match_by_english_title():
     """후보 직무 카드의 AI 노출도 — 영문 직업명으로 출처별 점수를 찾고 평균을 낸다. 없으면 None."""
     from types import SimpleNamespace
+
     from app.services import automation
 
     rows = [
@@ -262,6 +284,7 @@ def test_operator_is_not_offered_simple_labor():
 
 def test_diagnosis_rescales_ten_point_answers_and_derives_effect():
     from types import SimpleNamespace
+
     from app.services import automation
 
     ten_point = [SimpleNamespace(automation_score=3.5, ai_assistance_score=6.5),

@@ -1,10 +1,11 @@
-httpx>=0.27
-pandas>=2.2
-openpyxl>=3.1
-psycopg[binary]>=3.2
-pgvector>=0.3
-python-dotenv>=1.0
-tqdm>=4.66
-# 로컬 임베딩(BAAI/bge-m3). GPU 없는 환경은 torch CPU 빌드 권장:
+# 직접 의존성만 버전을 고정한다(2026-10-10 로컬 .venv 기준)
+httpx==0.28.1
+pandas==3.0.6
+openpyxl==3.1.5
+psycopg[binary]==3.3.6
+pgvector==0.5.0
+python-dotenv==1.2.4
+tqdm==4.70.1
+# 로컬 임베딩(BAAI/bge-m3) — backend 와 같은 버전을 쓴다. GPU 없는 환경은 torch CPU 빌드 권장:
 #   pip install torch --index-url https://download.pytorch.org/whl/cpu
-sentence-transformers>=3.0
+sentence-transformers==6.1.0

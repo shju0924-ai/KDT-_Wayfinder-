@@ -15,6 +15,7 @@ import logging
 import re
 import sqlite3
 import threading
+import time
 from datetime import date
 from pathlib import Path
 from typing import Literal, TypeVar
@@ -31,7 +32,6 @@ logger = logging.getLogger(__name__)
 # 2026-09-18: LLM 호출을 OpenAI(gpt-5.6-luna)에서 Anthropic Claude로 전환.
 # 2026-10-01: 로컬 모델(Ollama) 선택지 추가 — API 크레딧 없이도 전체 흐름이 돌도록.
 # 임베딩(app/services/embedding.py)은 로컬 모델 BAAI/bge-m3 사용 — Anthropic은 임베딩 API를 제공하지 않음.
-MODEL = "claude-opus-5"
 MAX_TOKENS = 16000
 
 _client: AsyncAnthropic | None = None
@@ -92,7 +92,7 @@ async def _parse(
         out = await _ollama_parse(schema, system, user, local_max_tokens)
     else:
         resp = await get_client().messages.parse(
-            model=MODEL,
+            model=settings.anthropic_model,
             max_tokens=max_tokens,
             system=system,
             messages=[{"role": "user", "content": user}],
@@ -105,12 +105,14 @@ async def _parse(
 
 
 # ── LLM 결과 캐시 (SQLite) ─────────────────────────────────
+# 키는 해시지만 값(역량 근거·업무 근거)에는 경력 서사에서 뽑은 문장이 들어간다 — 민감정보 원칙에 맞춰
+# LLM_CACHE_TTL_HOURS 가 지난 항목은 읽지 않고, 연결을 열 때 디스크에서도 지운다.
 _cache_lock = threading.Lock()
 _cache_conn: sqlite3.Connection | None = None
 
 
 def _cache_key(schema: type[BaseModel], system: str, user: str) -> str:
-    model = settings.ollama_model if settings.llm_provider == "ollama" else MODEL
+    model = settings.ollama_model if settings.llm_provider == "ollama" else settings.anthropic_model
     raw = json.dumps(
         [settings.llm_provider, model, schema.model_json_schema(), system, user],
         ensure_ascii=False,
@@ -126,9 +128,22 @@ def _cache_db() -> sqlite3.Connection | None:
     if _cache_conn is None:
         path = Path(settings.llm_cache_path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        _cache_conn = sqlite3.connect(path, check_same_thread=False)
-        _cache_conn.execute("CREATE TABLE IF NOT EXISTS llm_cache (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        conn = sqlite3.connect(path, check_same_thread=False)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS llm_cache "
+            "(key TEXT PRIMARY KEY, value TEXT NOT NULL, created_at REAL NOT NULL DEFAULT 0)"
+        )
+        # 보존 기한 도입 전의 캐시 파일 — 시각 정보가 없는 옛 항목은 0 으로 채워져 아래에서 지워진다
+        if "created_at" not in {row[1] for row in conn.execute("PRAGMA table_info(llm_cache)")}:
+            conn.execute("ALTER TABLE llm_cache ADD COLUMN created_at REAL NOT NULL DEFAULT 0")
+        conn.execute("DELETE FROM llm_cache WHERE created_at < ?", (_cache_cutoff(),))
+        conn.commit()
+        _cache_conn = conn
     return _cache_conn
+
+
+def _cache_cutoff() -> float:
+    return time.time() - settings.llm_cache_ttl_hours * 3600
 
 
 def _cache_get(key: str) -> str | None:
@@ -137,7 +152,9 @@ def _cache_get(key: str) -> str | None:
             db = _cache_db()
             if db is None:
                 return None
-            row = db.execute("SELECT value FROM llm_cache WHERE key = ?", (key,)).fetchone()
+            row = db.execute(
+                "SELECT value FROM llm_cache WHERE key = ? AND created_at >= ?", (key, _cache_cutoff())
+            ).fetchone()
         return row[0] if row else None
     except sqlite3.Error as e:
         logger.warning("LLM 캐시 읽기 실패: %s", e)
@@ -149,7 +166,10 @@ def _cache_put(key: str, value: str) -> None:
         with _cache_lock:
             db = _cache_db()
             if db is not None:
-                db.execute("INSERT OR REPLACE INTO llm_cache (key, value) VALUES (?, ?)", (key, value))
+                db.execute(
+                    "INSERT OR REPLACE INTO llm_cache (key, value, created_at) VALUES (?, ?, ?)",
+                    (key, value, time.time()),
+                )
                 db.commit()
     except sqlite3.Error as e:
         logger.warning("LLM 캐시 쓰기 실패: %s", e)

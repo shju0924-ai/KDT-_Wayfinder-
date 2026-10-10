@@ -98,7 +98,7 @@ export interface JobMatch {
   /** 요구역량 판단 근거가 된 공고 발췌 */
   requirement_excerpt?: string | null;
   fit_score: number; // 0~100
-  demand_outlook: string;
+  demand_outlook: "증가" | "유지" | "감소";
   transition_difficulty: "낮음" | "보통" | "높음";
   /** 이 공고와 연결되는 내 보유 역량 */
   matched_skills: string[];

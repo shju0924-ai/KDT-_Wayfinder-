@@ -1,0 +1,10 @@
+target-version = "py312"
+line-length = 120
+
+[lint]
+select = ["E", "F", "I", "UP", "B"]
+# B008: FastAPI 의 File(...)·Depends(...) 기본값 관용구
+# E501: 한국어 주석·프롬프트 문자열이 길어 줄 길이는 강제하지 않는다
+# B905: zip 길이가 다를 때 짧은 쪽에 맞추는 동작을 그대로 쓴다(strict=True 는 동작 변경)
+# UP047: TypeVar 제네릭 표기는 유지
+ignore = ["B008", "E501", "B905", "UP047"]

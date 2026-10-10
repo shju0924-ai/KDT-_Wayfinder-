@@ -1,23 +1,24 @@
 """DB 모델 — 공공데이터 적재 테이블 + 벡터 컬럼.
 
-개인정보 원칙(기획서): 이력서 등 민감정보는 세션 종료 시 즉시 파기.
-→ 사용자 경력 원문은 DB에 저장하지 않는 것을 기본으로 하고,
-  저장이 꼭 필요해지면 팀 회의에서 암호화·파기 정책을 먼저 정한다.
+개인정보 원칙: 이력서 등 민감정보는 저장하지 않는다 — 사용자 경력 원문은 DB에 넣지 않는 것을 기본으로 하고,
+저장이 꼭 필요해지면 암호화·파기 정책을 먼저 정한다.
 
 주의: data-pipeline/embedding/common.py 의 DDL과 테이블 구조를 항상 일치시킬 것
      (적재는 data-pipeline이 raw SQL로, 조회는 backend가 이 모델로 수행).
-
-TODO:
-  - [ ] 자동화 대체율 참조 테이블 (한국고용정보원)
-  - [ ] Alembic 마이그레이션 도입 여부 결정 (해커톤이면 create_all로도 충분)
+     스키마 변경은 위 DDL이 기준이며 마이그레이션 도구(Alembic)는 쓰지 않는다.
 """
-from datetime import datetime
+from datetime import UTC, datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import DateTime, Float, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.services.embedding import EMBEDDING_DIM
+
+
+def _utcnow() -> datetime:
+    """컬럼이 timezone 없는 DateTime 이라 UTC 기준 naive 값으로 저장한다(datetime.utcnow 대체)."""
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 class Base(DeclarativeBase):
@@ -38,7 +39,7 @@ class JobPosting(Base):
     required_skills_text: Mapped[str] = mapped_column(Text, comment="요구역량 서술 (임베딩 입력)")
     # 마감일은 수집 단계(collectors/filters.job_is_open)에서 마감된 공고를 거르는 데만 쓰고 저장하지 않는다
     embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True)
-    collected_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    collected_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
 class TrainingCourse(Base):
@@ -58,7 +59,7 @@ class TrainingCourse(Base):
     tuition: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="수강비(원)")
     address: Mapped[str | None] = mapped_column(String(200), nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True)
-    collected_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    collected_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
 class NcsUnit(Base):
@@ -76,7 +77,7 @@ class NcsUnit(Base):
     small_category: Mapped[str | None] = mapped_column(String(200), nullable=True)
     sub_category: Mapped[str | None] = mapped_column(String(200), index=True, nullable=True)
     source_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
-    collected_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    collected_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
 class AutomationOccupationScore(Base):
@@ -95,4 +96,4 @@ class AutomationOccupationScore(Base):
     metric: Mapped[str] = mapped_column(String(100))
     source_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
     source_url: Mapped[str] = mapped_column(String(1000))
-    collected_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    collected_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)

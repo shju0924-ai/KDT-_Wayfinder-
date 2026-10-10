@@ -5,8 +5,8 @@ from __future__ import annotations
 import io
 import re
 import struct
-import zlib
 import zipfile
+import zlib
 from pathlib import Path
 from xml.etree import ElementTree
 
@@ -193,7 +193,7 @@ def _parse_hwp(data: bytes, warnings: list[str]) -> str:
                 return hwp.openstream("PrvText").read().decode("utf-16le", errors="ignore")
     except ResumeParseError:
         raise
-    except (OSError, IOError, struct.error, zlib.error, ValueError) as exc:
+    except (OSError, struct.error, zlib.error, ValueError) as exc:
         raise ResumeParseError("HWP 문서를 읽지 못했습니다.") from exc
     return ""
 

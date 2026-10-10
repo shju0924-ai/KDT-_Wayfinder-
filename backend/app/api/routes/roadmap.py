@@ -8,12 +8,10 @@
 """
 import asyncio
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
 
 from app.api.errors import upstream_error
-from app.db.session import get_db
 from app.schemas.career import LearningRoadmap, RoadmapItem, SkillProfile
 from app.services import embedding, llm
 
@@ -37,7 +35,7 @@ class RoadmapRequest(BaseModel):
 
 
 @router.post("", response_model=LearningRoadmap, summary="목표 직무 → 맞춤 학습 로드맵 생성")
-async def generate_roadmap(req: RoadmapRequest, db: Session = Depends(get_db)) -> LearningRoadmap:
+async def generate_roadmap(req: RoadmapRequest) -> LearningRoadmap:
     skill_names = [s.name for s in req.profile.skills]
     given_gaps = [g.strip() for g in req.missing_skills if g.strip() and g.strip() not in skill_names][:4]
 
@@ -48,7 +46,7 @@ async def generate_roadmap(req: RoadmapRequest, db: Session = Depends(get_db)) -
 
         # 격차를 합쳐 한 번에 검색하면 한 격차 쪽 과정만 올라온다 — 격차마다 따로 찾는다
         found = await asyncio.gather(
-            *(embedding.search_similar_courses(db, gap, limit=COURSE_TOP_K) for gap in gaps)
+            *(embedding.search_similar_courses(gap, limit=COURSE_TOP_K) for gap in gaps)
         )
         courses_by_gap = {
             gap: [c for c in courses if c["similarity"] >= GAP_COURSE_THRESHOLD]

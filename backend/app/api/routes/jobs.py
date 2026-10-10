@@ -17,11 +17,9 @@ import asyncio
 import logging
 import re
 
-from fastapi import APIRouter, Depends
-from sqlalchemy.orm import Session
+from fastapi import APIRouter
 
 from app.api.errors import upstream_error
-from app.db.session import get_db
 from app.schemas.career import JobMatch, JobSearchTrack, SkillProfile
 from app.services import automation, embedding, llm
 
@@ -176,14 +174,11 @@ def _dedupe_targets(targets: list[dict]) -> list[dict]:
     return out
 
 
-async def _match_adjacent_transition(
-    profile: SkillProfile, db: Session, exclude_job: str | None
-) -> list[JobMatch]:
+async def _match_adjacent_transition(profile: SkillProfile, exclude_job: str | None) -> list[JobMatch]:
     """인접 직무 전환형 — 역량 벡터로 유사 공고를 찾고 격차가 작은 후보만 남긴다."""
     skill_names = [s.name for s in profile.skills]
     try:
         rows = await embedding.search_similar_jobs(
-            db,
             _skill_search_text(profile),
             limit=SEARCH_K,
             search_context=TRACK_SEARCH_CONTEXT["adjacent_transition"],
@@ -318,9 +313,7 @@ def _adjacent_job_match(row: dict, judged: dict) -> JobMatch:
     )
 
 
-async def _match_training_transition(
-    profile: SkillProfile, db: Session, exclude_job: str | None
-) -> list[JobMatch]:
+async def _match_training_transition(profile: SkillProfile, exclude_job: str | None) -> list[JobMatch]:
     """교육 후 직무 전환형 — LLM이 제안한 새 직무를 훈련과정·채용 데이터로 검증한다."""
     profile_lines = [line for line in _skill_search_text(profile).split("\n") if line.strip()]
     try:
@@ -337,8 +330,8 @@ async def _match_training_transition(
 
     async def verify(target: dict) -> tuple[dict, list[dict], list[dict]]:
         courses, jobs = await asyncio.gather(
-            embedding.search_similar_courses(db, target["job_title"], limit=3),
-            embedding.search_similar_jobs(db, target["job_title"], limit=3),
+            embedding.search_similar_courses(target["job_title"], limit=3),
+            embedding.search_similar_jobs(target["job_title"], limit=3),
         )
         return target, courses, jobs
 
@@ -413,7 +406,6 @@ async def _match_training_transition(
 @router.post("/match", response_model=list[JobMatch], summary="역량 프로필 → 다음 직무 매핑")
 async def match_jobs(
     profile: SkillProfile,
-    db: Session = Depends(get_db),
     exclude_job: str | None = None,
     search_track: JobSearchTrack = "adjacent_transition",
 ) -> list[JobMatch]:
@@ -425,5 +417,5 @@ async def match_jobs(
         return []
     exclude_job = exclude_job or profile.current_job_title
     if search_track == "training_transition":
-        return await _match_training_transition(profile, db, exclude_job)
-    return await _match_adjacent_transition(profile, db, exclude_job)
+        return await _match_training_transition(profile, exclude_job)
+    return await _match_adjacent_transition(profile, exclude_job)

@@ -22,10 +22,11 @@ import type {
 } from "../types/api";
 import type { ActionTarget, Journey, JourneyInput } from "../lib/journey";
 import { deriveJourney } from "../lib/journey";
+import { errorText } from "../lib/errors";
+import BusyMessage from "./BusyMessage";
 import Composer from "./Composer";
-import JourneyMap from "./JourneyMap";
-import StartChooser from "./StartChooser";
-import SurveyForm from "./SurveyForm";
+import JourneyDock from "./JourneyDock";
+import StartScreen from "./StartScreen";
 import { CompassMark } from "./icons";
 import SkillProfileCard from "./cards/SkillProfileCard";
 import JobMatchList from "./cards/JobMatchList";
@@ -51,41 +52,9 @@ interface Props {
   onNewChat: () => void;
 }
 
-/** 사용자에게 보여줄 오류 메시지로 변환 (원인을 숨기지 않되 읽을 수 있게).
- *  4xx 는 입력 문제라 서버 상태 안내를 붙이지 않는다. 파일 업로드에서 난 4xx 만 '파일' 문구를 쓴다. */
-function errorText(e: unknown, source: "file" | "request" = "request"): string {
-  const status = (e as { response?: { status?: number } })?.response?.status;
-  const rawDetail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
-  // FastAPI 요청 검증 오류(422)는 detail 이 객체 배열이라 그대로 넣으면 [object Object] 가 된다
-  const detail =
-    typeof rawDetail === "string"
-      ? rawDetail
-      : rawDetail !== undefined
-        ? JSON.stringify(rawDetail)
-        : ((e as Error)?.message ?? String(e));
-  if (status && status < 500) {
-    return source === "file"
-      ? `파일을 읽지 못했어요.\n(${detail})`
-      : `요청 내용을 처리하지 못했어요.\n(${detail})`;
-  }
-  return `요청을 처리하지 못했어요.\n(${detail})\n\n백엔드가 실행 중인지, API 키가 설정돼 있는지 확인해주세요.`;
-}
-
 export default function Chat({ onJourney, onNewChat }: Props) {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [busy, setBusy] = useState(false);
-  // 로컬 모델은 단계당 수 분~20분 — 멈춘 것으로 오해하지 않도록 경과 시간을 보여준다
-  const [busySeconds, setBusySeconds] = useState(0);
-  useEffect(() => {
-    if (!busy) return;
-    setBusySeconds(0);
-    const started = Date.now();
-    const id = window.setInterval(
-      () => setBusySeconds(Math.floor((Date.now() - started) / 1000)),
-      1000,
-    );
-    return () => window.clearInterval(id);
-  }, [busy]);
 
   // 각 단계의 실제 API 응답
   const [career, setCareer] = useState<CareerInput | null>(null);
@@ -101,16 +70,11 @@ export default function Chat({ onJourney, onNewChat }: Props) {
   const [doneItems, setDoneItems] = useState<string[]>([]);
   const [reflected, setReflected] = useState(false);
   const [reflectShown, setReflectShown] = useState(false);
-  const [journeyExpanded, setJourneyExpanded] = useState(false);
-
-  // 시작 화면 모드 — 방식 선택 → 설문 / 파일 / 자유 입력
-  const [startMode, setStartMode] = useState<"choose" | "survey">("choose");
 
   const idRef = useRef(0);
   const endRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const dockRef = useRef<HTMLDivElement>(null);
-  const startFileRef = useRef<HTMLInputElement>(null);
 
   const nextId = () => ++idRef.current;
   const push = (...items: Omit<Msg, "id">[]) =>
@@ -457,113 +421,23 @@ export default function Chat({ onJourney, onNewChat }: Props) {
     }
   };
 
-  // 시작 화면의 파일 선택은 자유 입력 Composer와 독립적으로 동작한다.
-  const openFilePicker = () => startFileRef.current?.click();
-
-  // ── 시작 화면 · 설문 작성 ────────────────────────────────
-  if (messages.length === 0 && startMode === "survey") {
-    return (
-      <main className="chat">
-        <div className="survey-view">
-          <div className="survey-inner">
-            <SurveyForm
-              onSubmit={handleSurveySubmit}
-              onCancel={() => setStartMode("choose")}
-              busy={busy}
-            />
-          </div>
-        </div>
-      </main>
-    );
-  }
-
-  // ── 시작 화면 (히어로) ───────────────────────────────────
+  // ── 시작 화면 ────────────────────────────────────────────
   if (messages.length === 0) {
     return (
-      <main className="chat">
-        <div className="hero">
-          <div className="hero-inner">
-            <CompassMark size={48} />
-            <h1>어떤 방식으로 시작할까요?</h1>
-            <p className="hero-sub">
-              경력 속에 숨어 있는 역량을 찾아, 다음 커리어로 가는 지도를 함께 그려드릴게요.
-              이력서가 없어도 괜찮아요.
-            </p>
-
-            <input
-              ref={startFileRef}
-              className="file-input"
-              type="file"
-              accept=".pdf,.docx,.hwp,.hwpx"
-              disabled={busy}
-              onChange={(event) => {
-                const file = event.target.files?.[0];
-                if (file) handleFile(file);
-                event.target.value = "";
-              }}
-            />
-
-            <StartChooser
-              onSurvey={() => setStartMode("survey")}
-              onFile={openFilePicker}
-              disabled={busy}
-            />
-
-            {/* 시작 전에도 앞으로의 여정을 미리 보여준다 */}
-            <JourneyMap journey={journey} onAction={handleJourneyAction} preview />
-
-            <p className="hero-disclaimer">
-              AI가 판정하지 않습니다 — 모든 단계는 당신이 검토하고 선택합니다.
-            </p>
-          </div>
-        </div>
-      </main>
+      <StartScreen
+        journey={journey}
+        busy={busy}
+        onFile={handleFile}
+        onSurveySubmit={handleSurveySubmit}
+        onJourneyAction={handleJourneyAction}
+      />
     );
   }
 
   // ── 대화 화면 ────────────────────────────────────────────
   return (
     <main className="chat">
-      {/* 결과를 읽는 흐름을 방해하지 않도록 여정은 요약으로 시작하고 필요할 때 펼친다. */}
-      <div className={`journey-dock${journeyExpanded ? " expanded" : ""}`}>
-        <button
-          type="button"
-          className="journey-toggle"
-          onClick={() => setJourneyExpanded((expanded) => !expanded)}
-          aria-expanded={journeyExpanded}
-          aria-controls="journey-detail"
-        >
-          <span className="journey-toggle-context">
-            <span className="journey-toggle-eyebrow">나의 여정</span>
-            <span className="journey-toggle-stage">
-              {journey.complete ? "여정 완주" : `${journey.current.step}단계 · ${journey.current.label}`}
-            </span>
-          </span>
-          <span className="journey-toggle-progress" aria-label={`전체 달성률 ${journey.percent}%`}>
-            <span className="journey-toggle-bar" aria-hidden>
-              <span style={{ width: `${journey.percent}%` }} />
-            </span>
-            <b>{journey.percent}%</b>
-          </span>
-          <span className="journey-toggle-action">
-            {journeyExpanded ? "접기" : "전체 여정 보기"}
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
-              <path
-                d="m4 6 4 4 4-4"
-                stroke="currentColor"
-                strokeWidth="1.8"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </span>
-        </button>
-        {journeyExpanded && (
-          <div id="journey-detail">
-            <JourneyMap journey={journey} onAction={handleJourneyAction} />
-          </div>
-        )}
-      </div>
+      <JourneyDock journey={journey} onAction={handleJourneyAction} />
 
       <div className="chat-scroll" ref={scrollRef}>
         <div className="chat-col">
@@ -591,27 +465,7 @@ export default function Chat({ onJourney, onNewChat }: Props) {
               </div>
             </div>
           ))}
-          {busy && (
-            <div className="msg assistant">
-              <div className="msg-avatar">
-                <CompassMark size={18} />
-              </div>
-              <div className="msg-body">
-                <span className="typing" aria-label="응답 작성 중">
-                  <i />
-                  <i />
-                  <i />
-                </span>
-                {busySeconds >= 10 && (
-                  <p className="busy-note">
-                    분석 중이에요 · {Math.floor(busySeconds / 60)}분 {busySeconds % 60}초 경과
-                    <br />
-                    로컬 AI 모델은 단계에 따라 최대 20분 정도 걸릴 수 있어요. 창을 닫지 말고 기다려주세요.
-                  </p>
-                )}
-              </div>
-            </div>
-          )}
+          {busy && <BusyMessage />}
           <div ref={endRef} />
         </div>
       </div>

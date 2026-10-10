@@ -1,6 +1,7 @@
-"""SQLAlchemy 세션 — FastAPI 의존성으로 주입해서 사용."""
+"""SQLAlchemy 엔진·세션 팩토리.
+
+라우터는 세션을 주입받지 않는다 — 동기 쿼리는 embedding.run_db 가 스레드마다 자체 세션을 열어 실행한다."""
 import logging
-from collections.abc import Generator
 
 from sqlalchemy import create_engine
 from sqlalchemy.exc import OperationalError
@@ -20,15 +21,12 @@ engine = create_engine(
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
-def get_db() -> Generator[Session, None, None]:
-    """FastAPI 라우터에서: db: Session = Depends(get_db)"""
-    db = SessionLocal()
+def close_quietly(db: Session) -> None:
+    """세션을 닫되, 이미 끊긴 연결의 정리 오류는 무시한다.
+
+    결과를 다 읽은 뒤 close 단계에서 난 연결 오류로 성공한 요청을 실패로 바꾸지 않는다.
+    죽은 연결은 풀에서 버려지고(pool_pre_ping) 다음 요청은 새 연결을 쓴다."""
     try:
-        yield db
-    finally:
-        try:
-            db.close()
-        except OperationalError as e:
-            # 응답을 이미 보낸 뒤라 여기서 예외가 나가면 서버가 클라이언트 연결을 끊는다.
-            # 죽은 연결은 풀에서 버려지고(pool_pre_ping) 다음 요청은 새 연결을 쓴다.
-            logger.warning("DB 세션 정리 중 연결 오류 무시: %s", e)
+        db.close()
+    except OperationalError as e:
+        logger.warning("DB 세션 정리 중 연결 오류 무시: %s", e)

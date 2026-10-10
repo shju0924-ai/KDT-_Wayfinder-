@@ -10,8 +10,8 @@ import hashlib
 import logging
 import re
 import threading
-from pathlib import Path
 from collections import defaultdict
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -289,7 +289,6 @@ def _match_ncs(
 
 
 async def diagnose(
-    db: Session,
     career_text: str,
     job_title: str | None = None,
 ) -> RiskDiagnosis:

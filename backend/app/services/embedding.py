@@ -18,7 +18,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.db.session import SessionLocal
+from app.db.session import SessionLocal, close_quietly
 
 logger = logging.getLogger(__name__)
 
@@ -178,7 +178,7 @@ async def run_db(fn, *args):
         try:
             return fn(db, *args)
         finally:
-            db.close()
+            close_quietly(db)
 
     return await asyncio.to_thread(work)
 
@@ -193,9 +193,8 @@ def _execute_hnsw(db: Session, sql: str, params: dict, candidates: int) -> list[
       (실측 전체 스캔 ~4초 vs HNSW ~0.4초).
     SET LOCAL 이라 트랜잭션이 끝나면 원래 값으로 돌아간다.
 
-    읽기 전용 검색이므로 끝나면 바로 트랜잭션을 닫아 연결을 풀에 돌려준다. 열어 둔 채로 두면
-    뒤이은 로컬 LLM 호출(최대 30분) 동안 'idle in transaction' 연결이 붙잡혀 있다가, 그 사이 DB 쪽
-    연결이 끊기면 요청 종료 시 ROLLBACK 이 실패해 응답 뒤 ASGI 예외·클라이언트 연결 끊김이 났다.
+    읽기 전용 검색이므로 끝나면 바로 트랜잭션을 닫는다 — 예전에는 요청 단위 세션이 뒤이은 로컬 LLM
+    호출(최대 30분) 동안 'idle in transaction' 으로 연결을 붙잡아, 그 사이 끊기면 응답 뒤 예외가 났다.
     """
     try:
         db.execute(text(f"SET LOCAL hnsw.ef_search = {int(candidates)}"))
@@ -259,7 +258,6 @@ def build_work24_course_url(source_id: str) -> str | None:
 
 
 async def search_similar_jobs(
-    db: Session,
     skill_text: str,
     limit: int = 5,
     search_context: str | None = None,
@@ -291,7 +289,7 @@ async def search_similar_jobs(
     )
 
 
-async def search_similar_courses(db: Session, gap_text: str, limit: int = 5) -> list[dict]:
+async def search_similar_courses(gap_text: str, limit: int = 5) -> list[dict]:
     """역량 격차 텍스트 → 유사한 훈련과정 top-k (STEP 4).
 
     검색어는 '보유 역량'이 아니라 '부족한 역량'이어야 의미 있는 추천이 나온다.
