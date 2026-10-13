@@ -43,9 +43,11 @@ def compose_career_text(survey: SurveyInput) -> str:
     if experience:
         parts.append(f"가장 자신 있게 설명할 수 있는 경험은 다음과 같습니다.\n{experience}")
 
+    # 강점은 고정 선택지 문구('문서·데이터 관리')라 업무처럼 쓰면 진단이 이를 업무로 쪼갰다(e2e 실측) —
+    # 자기 평가임을 문장에 밝혀, 업무는 위 경험 서술에서만 나오게 한다
     strengths = [s.strip() for s in survey.strengths if s and s.strip()]
     if strengths:
-        parts.append(f"업무 중에서 자주 맡았거나 잘했던 일은 {', '.join(strengths)}입니다.")
+        parts.append(f"설문에서 고른 제 강점(업무 내용이 아닌 자기 평가): {', '.join(strengths)}")
 
     concern = survey.concern.strip()
     if concern:

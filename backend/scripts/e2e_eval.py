@@ -3,11 +3,16 @@
 LLM·임베딩·DB가 모두 떠 있어야 한다(런팟 터널 또는 로컬). 앱을 프로세스 안에서 ASGI로 호출한다.
 
     cd backend
-    python -m scripts.e2e_eval              # 전체 페르소나
-    python -m scripts.e2e_eval --set v2     # 두 번째 페르소나 세트
+    python -m scripts.e2e_eval              # 첫 번째 페르소나 세트(v1)
+    python -m scripts.e2e_eval --set v2     # 두 번째 세트 — v1 과적합 점검
+    python -m scripts.e2e_eval --set resume # 이력서 원문 경로
+    python -m scripts.e2e_eval --set ui     # 시작 화면 예시 입력
+    python -m scripts.e2e_eval --set resume,ui   # 여러 세트
     python -m scripts.e2e_eval --only md    # 하나만
     python -m scripts.e2e_eval --json out.json
     python -m scripts.e2e_eval --set all --sequential   # 로컬 CPU — 한 명씩, 요청도 하나씩
+
+페르소나는 scripts/personas/personas.json(세트·작성 기준은 같은 폴더 README.md)에 있다.
 
 LLM 캐시를 거치면 실제 품질·시간이 아니라 이전 결과를 보게 되므로, 이 스크립트는 새 임시 캐시를 쓴다.
 """
@@ -29,88 +34,23 @@ import re  # noqa: E402
 import httpx  # noqa: E402
 
 from app.main import app  # noqa: E402
-
-PERSONAS: dict[str, dict] = {
-    "md": {
-        "job_title": "온라인 쇼핑몰 MD",
-        "years": "5년 이상",
-        "experience": "자사몰과 오픈마켓 상품 기획을 맡아 판매 데이터를 엑셀로 분석해 주간 프로모션을 짰고, "
-                      "협력사 20곳과 입고 일정·단가를 협상했습니다. 상세페이지 개편으로 전환율을 1.4%에서 2.1%로 올렸습니다.",
-        "strengths": ["데이터 분석", "협상", "기획"],
-        "concern": "AI 추천·자동 발주가 늘면서 MD 업무가 줄어들까 걱정됩니다.",
-        "aspiration": "데이터를 더 깊게 다루는 일",
-    },
-    "callcenter": {
-        "job_title": "콜센터 상담원",
-        "years": "3년 이상",
-        "experience": "통신사 인바운드 상담을 하며 하루 80콜 이상 요금·해지 문의를 처리했고, 강성 민원 고객을 진정시켜 "
-                      "해지 방어율 팀 1위를 했습니다. 신입 상담원 5명의 응대 스크립트 교육도 맡았습니다.",
-        "strengths": ["고객 응대", "갈등 해결", "교육"],
-        "concern": "AI 챗봇·음성봇 도입으로 상담 인력이 줄고 있습니다.",
-        "aspiration": "사람을 상대하는 강점을 살리고 싶어요",
-    },
-    "accounting": {
-        "job_title": "회계 사무원",
-        "years": "4년 이상",
-        "experience": "중소 제조업체에서 매입·매출 전표 입력, 월 결산, 부가세 신고 자료 준비를 했습니다. "
-                      "더존 ERP를 쓰며 거래처 200곳의 미수금을 관리했고, 엑셀 매크로로 결산 보고서 작성 시간을 절반으로 줄였습니다.",
-        "strengths": ["꼼꼼함", "엑셀", "숫자 감각"],
-        "concern": "회계 자동화 프로그램 때문에 단순 입력 업무가 사라지고 있습니다.",
-        "aspiration": None,
-    },
-    "production": {
-        "job_title": "생산관리 담당자",
-        "years": "6년 이상",
-        "experience": "자동차 부품 공장에서 주간 생산계획을 세우고 라인별 설비 가동률과 불량률을 관리했습니다. "
-                      "협력업체 자재 납기를 조율했고, 공정 개선 TF로 불량률을 3.2%에서 1.8%로 낮췄습니다.",
-        "strengths": ["일정 관리", "문제 해결", "협업"],
-        "concern": "스마트팩토리 도입으로 관리 업무가 시스템으로 대체될까 걱정됩니다.",
-        "aspiration": "데이터 기반 공정 관리",
-    },
-}
-
-
-# 두 번째 세트 — 첫 세트에 맞춘 조정이 다른 경력에서도 통하는지 확인한다(과적합 점검).
-# 'raw_text' 가 있으면 설문 대신 이력서 텍스트 경로(직무명 입력 없음 → STEP 2가 직무명을 추출)로 돌린다.
-PERSONAS_V2: dict[str, dict] = {
-    "insurance": {
-        "job_title": "보험설계사",
-        "years": "5년 이상",
-        "experience": "생명보험사 전속 설계사로 고객 300명의 보장 분석과 상품 설계를 했고, 지인 소개 위주로 연간 신규 계약 "
-                      "120건을 체결했습니다. 고객 상담 내용을 엑셀로 정리해 갱신 시기를 관리했고 지점 신입 교육도 했습니다.",
-        "strengths": ["고객 응대", "협업·조율", "문서·데이터 관리"],
-        "concern": "비대면 보험 가입과 AI 상품 추천으로 대면 영업이 줄고 있습니다.",
-        "aspiration": "금융 지식을 살려 상담이나 분석 쪽으로 가고 싶어요",
-    },
-    "nurse_aide": {
-        "job_title": "간호조무사",
-        "years": "3년 이상",
-        "experience": "내과 의원에서 하루 환자 100명의 접수·예약과 활력징후 측정, 주사·검사 보조를 했습니다. "
-                      "EMR로 진료 기록과 보험 청구 자료를 입력했고, 고령 환자 보호자 응대와 민원 처리를 맡았습니다.",
-        "strengths": ["고객 응대", "현장 대응", "문서·데이터 관리"],
-        "concern": "무인 접수기와 AI 문진이 들어오면서 접수 업무가 줄고 있습니다.",
-        "aspiration": None,
-    },
-    "cnc": {
-        "job_title": "CNC 선반 조작원",
-        "years": "10년 이상",
-        "experience": "정밀 기계부품 공장에서 CNC 선반 프로그램을 작성하고 공구 세팅·가공 조건을 조정했습니다. "
-                      "도면을 보고 공차를 맞추며 불량 원인을 찾아 개선했고, 신입 작업자 3명에게 장비 조작을 가르쳤습니다.",
-        "strengths": ["문제 해결", "현장 대응", "운영 개선"],
-        "concern": "자동화 라인이 늘면서 단순 가공 인력이 줄고 있습니다.",
-        "aspiration": "설비를 다루는 경험을 살리고 싶어요",
-    },
-    "web_publisher": {
-        "raw_text": "경력 요약\n웹 퍼블리셔 (4년)\n"
-                    "- 에이전시에서 쇼핑몰·기업 홈페이지 30여 건의 HTML/CSS 마크업과 반응형 작업 담당\n"
-                    "- jQuery로 인터랙션 구현, 웹 접근성 인증 마크 획득 프로젝트 2건 참여\n"
-                    "- 디자이너·개발자 사이에서 화면 설계서 검토와 일정 조율\n"
-                    "- 최근 노코드 빌더와 AI 코드 생성 도구로 퍼블리싱 의뢰가 줄어 프론트엔드 개발로 전환 고민 중",
-    },
-}
-
+from scripts import personas  # noqa: E402
 
 _HANJA = re.compile(r"[\u4e00-\u9fff]")
+# \uc545\uc13c\ud2b8 \ub77c\ud2f4 \ubb38\uc790(\uc2a4\ud398\uc778\uc5b4 \ub4f1) \u2014 \uc601\uc5b4 \ub3c4\uad6c\uba85\uc740 \ud5c8\uc6a9\ud558\ubbc0\ub85c \uc774 \ubc94\uc704\ub9cc \uc13c\ub2e4
+_ACCENTED = re.compile(r"[\u00c0-\u024f]")
+
+
+def _llm_texts(profile: dict, adjacent: list, training: list, roadmaps: list, risk: dict) -> str:
+    """LLM \uc774 \ub9cc\ub4e0 \ubb38\uc790\uc5f4\ub9cc \ubaa8\uc740\ub2e4 \u2014 \uacf5\uace0 \uc9c1\ubb34\uba85\u00b7\uacfc\uc815\uba85 \uac19\uc740 DB \uc6d0\ubb38\uc744 \ube7c\uc57c \ud55c\uad6d\uc5b4 \ucd9c\ub825 \uc810\uac80\uc774 \uc624\ud0d0\ud558\uc9c0 \uc54a\ub294\ub2e4
+    (\uc2e4\uce21: \uc2e4\uc81c \uacfc\uc815\uba85 '\uc138\ubb34\ub97c \uc54c\uba74 \ube44\uc988\ub2c8\uc2a4\uac00 \u901a\ud55c\ub2e4'\uc758 '\u901a'\uc774 \ud55c\uc790 2\uac74\uc73c\ub85c \uc7a1\ud614\ub2e4)."""
+    parts: list[str] = [risk.get("job_title") or ""]
+    parts += [f"{t['name']} {t['rationale']}" for t in risk["tasks"]]
+    parts += [f"{s['name']} {s['evidence']}" for s in profile["skills"]]
+    parts += [" ".join(j["matched_skills"] + j["missing_skills"]) for j in adjacent]
+    parts += [" ".join([j["job_title"], *j["missing_skills"]]) for j in training]  # \uad50\uc721 \ud2b8\ub799 \uc9c1\ubb34\uba85\uc740 LLM \uc81c\uc548
+    parts += [i["skill_gap"] for r in roadmaps for i in r["items"]]
+    return "\n".join(parts)
 
 
 class _Collect(logging.Handler):
@@ -189,8 +129,9 @@ async def run_persona(c: httpx.AsyncClient, key: str, survey: dict, sequential: 
             "roadmap_with_course": sum(1 for i in items if i["course"]),
             "jobs_with_exposure": sum(1 for j in adjacent + training if j["ai_exposure_score"] is not None),
             "jobs_total": len(adjacent) + len(training),
-            # 화면에 보이는 모든 문자열에서 한자가 남았는지 — 한국어 전용 출력 점검
-            "hanja_left": len(_HANJA.findall(json.dumps([profile, adjacent, training, roadmaps, risk], ensure_ascii=False))),
+            # LLM 이 만든 문자열에 한자·외국어가 남았는지 — 한국어 전용 출력 점검
+            "hanja_left": len(_HANJA.findall(llm_text := _llm_texts(profile, adjacent, training, roadmaps, risk))),
+            "foreign_left": len(_ACCENTED.findall(llm_text)),
             "weak_jobs": sum(1 for j in adjacent + training if j["weak_reasons"]),
             "weak_courses": sum(1 for i in items if i.get("weak_reason")),
         },
@@ -199,20 +140,32 @@ async def run_persona(c: httpx.AsyncClient, key: str, survey: dict, sequential: 
 
 async def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--set", choices=["v1", "v2", "all"], default="v1", help="페르소나 세트 (all = 8명)")
+    # 불러오면서 모든 페르소나를 검증한다 — 규칙을 어긴 페르소나가 있으면 실행 전에 멈춘다
+    sets = personas.load()
+    ap.add_argument("--set", default="v1",
+                    help=f"페르소나 세트, 쉼표로 여러 개 또는 all "
+                         f"({', '.join(f'{k} {len(v)}명' for k, v in sets.items())})")
     ap.add_argument("--only")
-    ap.add_argument("--json")
+    ap.add_argument("--json", help="결과 JSON 경로 — 페르소나가 끝날 때마다 덮어써 중간에 멈춰도 끝난 결과는 남는다")
     ap.add_argument("--sequential", action="store_true", help="페르소나·요청을 하나씩 실행 (로컬 CPU용)")
     args = ap.parse_args()
 
-    personas = {"v1": PERSONAS, "v2": PERSONAS_V2, "all": {**PERSONAS, **PERSONAS_V2}}[args.set]
+    try:
+        selected_set = personas.select(args.set)
+    except personas.PersonaError as e:
+        ap.error(str(e))
+    done: list[dict] = []
+
+    def save_progress() -> None:
+        if args.json:
+            Path(args.json).write_text(json.dumps(done, ensure_ascii=False, indent=1), encoding="utf-8")
     collector = _Collect()
     logging.getLogger("app").addHandler(collector)
     logging.getLogger("app").setLevel(logging.DEBUG if os.environ.get("EVAL_DEBUG") else logging.INFO)
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t", timeout=1800) as c:
         t0 = time.perf_counter()
-        selected = [(k, v) for k, v in personas.items() if not args.only or k == args.only]
+        selected = [(k, v) for k, v in selected_set.items() if not args.only or k == args.only]
 
         async def safe_run(key: str, survey: dict) -> dict | None:
             # 한 명이 실패해도 나머지 결과는 남긴다 — 로컬에서는 전체가 몇 시간짜리다
@@ -222,6 +175,8 @@ async def main() -> None:
                 print(f"[실패] {key}: {e!r}", flush=True)
                 return None
             print(f"[완료] {key} {res['total']}s", flush=True)
+            done.append(res)
+            save_progress()
             return res
 
         if args.sequential:
@@ -250,15 +205,17 @@ async def main() -> None:
         if failed:
             print("실패한 페르소나:", ", ".join(failed))
 
-    print("\n| 페르소나 | 시간(s) | 진단 점수 | 인접 | 훈련 | 로드맵 과정 연결 | 직무 노출도 | 근거 약함(직무/과정) | 한자 |")
-    print("|---|---|---|---|---|---|---|---|---|")
+    print("\n| 페르소나 | 시간(s) | 진단 점수 | 근거 충족도 | 인접 | 훈련 | 로드맵 과정 연결 | 직무 노출도 "
+          "| 근거 약함(직무/과정) | 한자/외국어 |")
+    print("|---|---|---|---|---|---|---|---|---|---|")
     for r in results:
         m = r["metrics"]
-        print(f"| {r['persona']} | {r['total']} | {r['risk']['score']} | {m['adjacent_n']} | {m['training_n']} | "
+        print(f"| {r['persona']} | {r['total']} | {r['risk']['score']} | {r['risk']['confidence']} | "
+              f"{m['adjacent_n']} | {m['training_n']} | "
               f"{m['roadmap_with_course']}/{m['roadmap_items']} | {m['jobs_with_exposure']}/{m['jobs_total']} | "
-              f"{m['weak_jobs']}/{m['weak_courses']} | {m['hanja_left']} |")
-    if args.json:
-        Path(args.json).write_text(json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8")
+              f"{m['weak_jobs']}/{m['weak_courses']} | {m['hanja_left']}/{m['foreign_left']} |")
+    done[:] = results  # 병렬 실행은 끝난 순서로 쌓였다 — 마지막에 페르소나 순서로 다시 쓴다
+    save_progress()
 
 
 if __name__ == "__main__":

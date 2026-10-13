@@ -116,7 +116,8 @@ ssh -N -L 11434:127.0.0.1:11434 -L 8010:127.0.0.1:8010 root@<IP> -p <PORT> -i ~/
 
 터널이 끊기면 임베딩은 로컬 계산으로 자동 전환됩니다(느려짐). Pod에 Network Volume이 없으면 Stop 시
 `/workspace` 의 모델이 지워지므로 `start.sh` 가 다시 내려받습니다. 품질 회귀 점검은
-`cd backend && python -m scripts.e2e_eval` (페르소나 4명, 병렬 약 5~6분).
+`cd backend && python -m scripts.e2e_eval` (v1 페르소나 4명, 병렬 약 5~6분). `--set v2|resume|ui|all`(쉼표로 여러 개, 예: `resume,ui`) 로
+다른 세트를 돌립니다 — 세트와 작성 기준은 `backend/scripts/personas/README.md`.
 
 #### GPU 서버에서 임베딩만 계산하기
 

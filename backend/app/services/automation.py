@@ -37,30 +37,56 @@ NCS_URL = "https://www.data.go.kr/data/15063879/openapi.do"
 
 EXTERNAL_WEIGHT = 0.25
 TASK_WEIGHT = 1 - EXTERNAL_WEIGHT
-# 단어 겹침 비율. 'nursing assistant' ↔ 'sewing assistant' = 0.5 는 떨어뜨리고 2단어 중 2단어 일치만 통과
-MATCH_THRESHOLD = 0.6
+# 직업명 매칭 점수(_title_similarity) 하한. 규칙을 통과한 매칭의 최솟값(0.7×0.67 + 0.3×0.25 ≈ 0.54)이 넘는다
+MATCH_THRESHOLD = 0.5
+# 매칭 규칙: 찾는 직업명 단어의 이 비율 이상이 자료 직업명에 있어야 한다
+_QUERY_COVERAGE_MIN = 0.67
+# 자료 직업명 단어 중 이 비율 이상이 겹쳐야 한다 — 'Sales Representatives, Wholesale and Manufacturing, …'(8단어)
+# 처럼 긴 O*NET 이름도 핵심 2단어가 같으면 통과시키는 수준
+_SOURCE_COVERAGE_MIN = 0.25
+# 단독으로는 직업을 특정하지 못하는 핵심 명사 — 'Manager' 하나로 'Project Manager' 에 붙지 않게 한다
+_GENERIC_HEADS = {
+    "manager", "assistant", "clerk", "specialist", "operator", "officer", "agent", "representative",
+    "technician", "analyst", "engineer", "director", "supervisor", "employee", "staff", "consultant",
+}
 
 
 def _round(value: float) -> float:
     return round(max(0.0, min(100.0, value)), 1)
 
 
+def _title_tokens(value: str) -> list[str]:
+    cleaned = re.sub(r"[^a-z0-9 ]+", " ", value.lower())
+    return [re.sub(r"(?<=[a-z]{3})s$", "", t) for t in cleaned.split() if len(t) > 1 and t not in _TITLE_STOPWORDS]
+
+
 def _title_similarity(left: str, right: str) -> float:
-    """영문 직업명 유사도 — 단어 일치 기준.
+    """영문 직업명 매칭 점수(0~1) — left 는 찾는 직업명(LLM), right 는 노출도 자료의 직업명.
 
-    문자열 유사도(SequenceMatcher)를 함께 쓰면 'Nursing Assistant' 가 'Sewing assistant' 와 0.85로
-    매칭됐다. 직업명은 핵심 단어가 같아야 같은 직업이므로, 복수형 s 를 뗀 단어 집합의 겹침만 본다."""
-    def tokens(value: str) -> set[str]:
-        cleaned = re.sub(r"[^a-z0-9 ]+", " ", value.lower())
-        return {re.sub(r"(?<=[a-z]{3})s$", "", t) for t in cleaned.split() if len(t) > 1 and t not in _TITLE_STOPWORDS}
-
-    a, b = tokens(left), tokens(right)
+    문자열 유사도(SequenceMatcher)는 'Nursing Assistant' 를 'Sewing assistant' 와 0.85로 붙였고,
+    단어 겹침 ÷ 긴 쪽 단어 수는 같은 직업도 표기가 길면 놓쳤다('Translators' ↔ 'Interpreters and
+    Translators' 0.5). 그래서 세 조건을 모두 볼 때만 매칭으로 본다 — 핵심 명사(마지막 단어)가 자료
+    직업명에 있고, 찾는 직업명 단어 대부분이 들어 있고, 자료 직업명과도 일정 비율 겹칠 것.
+    점수는 찾는 쪽 포함률 0.7 + 자료 쪽 포함률 0.3. 조건을 못 넘으면 0."""
+    left_tokens, right_tokens = _title_tokens(left), _title_tokens(right)
+    a, b = set(left_tokens), set(right_tokens)
     if not a or not b:
         return 0.0
-    return len(a & b) / max(len(a), len(b))
+    head = left_tokens[-1]
+    if head not in b or (len(a) == 1 and head in _GENERIC_HEADS):
+        return 0.0
+    # 자료 직업명의 첫 단어(대개 분야 수식어)도 찾는 직업명에 있어야 한다 — 'Tellers' 가 'Fortune Teller',
+    # 'Office Clerks' 가 'Pass Office Clerk' 에 붙는 것을 막는다
+    if right_tokens[0] not in a:
+        return 0.0
+    common = len(a & b)
+    query_cov, source_cov = common / len(a), common / len(b)
+    if query_cov < _QUERY_COVERAGE_MIN or source_cov < _SOURCE_COVERAGE_MIN:
+        return 0.0
+    return 0.7 * query_cov + 0.3 * source_cov
 
 
-_TITLE_STOPWORDS = {"and", "of", "the", "other", "all", "workers", "worker"}
+_TITLE_STOPWORDS = {"and", "of", "the", "other", "all", "workers", "worker", "in", "except", "for", "general"}
 
 
 # 업무별 주효과는 두 점수로 정한다 — LLM 라벨은 점수와 어긋났다(자동화 점수 3.5인데 'automation').
@@ -77,11 +103,16 @@ def task_effect(automation_score: float, ai_assistance_score: float) -> str:
 
 
 def normalize_task_scale(tasks: list) -> float:
-    """업무 점수의 척도 배율. 모든 점수가 10 이하이면 모델이 10점 만점으로 답한 것으로 보고 10을 곱한다.
+    """업무 점수의 척도 배율. 모든 점수가 10 이하이면 모델이 10점 만점으로 답한 것으로 보고 10을 곱하고,
+    1 이하이면 0~1 비율로 답한 것으로 보고 100을 곱한다.
 
     100점 척도에서 모든 업무가 10점 이하일 수도 있지만(사람 중심 직무), 9b 실측에서는 '자동화' 라벨을 단
-    업무까지 3.5·6.5점이 나와 10점 척도 오답이 훨씬 흔했다. 이 보정은 응답 원문 대신 로그로 남긴다."""
+    업무까지 3.5·6.5점이 나와 10점 척도 오답이 훨씬 흔했다. 4b는 0.4·0.8 처럼 비율로도 답해
+    은행 텔러 진단이 0.4점이 됐다. 이 보정은 응답 원문 대신 로그로 남긴다."""
     values = [float(v) for t in tasks for v in (t.automation_score, t.ai_assistance_score)]
+    if values and 0 < max(values) <= 1:
+        logger.warning("업무 점수가 0~1 비율로 보임 — 100점 척도로 환산 (최댓값 %.2f)", max(values))
+        return 100.0
     if values and max(values) <= 10 and max(values) > 1:
         logger.warning("업무 점수가 10점 척도로 보임 — 100점 척도로 환산 (최댓값 %.1f)", max(values))
         return 10.0
@@ -288,6 +319,28 @@ def _match_ncs(
     )
 
 
+# 수치가 든 구체적 사실 — '하루 80콜', '전환율 1.4%', '협력사 20곳', '7년'
+_QUANT_FACT = re.compile(r"\d+(?:[.,]\d+)?\s*(?:%|퍼센트|명|건|곳|콜|년|개월|주|시간|배|원|만|천|억|회|개|대|단어)")
+
+
+def evidence_confidence(career_text: str, task_count: int, ncs_matched: bool, exposure_sources: int) -> int:
+    """근거 충족도(화면 '근거 충족도') — 진단을 받칠 근거가 입력과 자료에 얼마나 있는지.
+
+    이전 산식(45 + 업무 수 + NCS + 노출도)은 로컬에서 NCS 매칭이 꺼져 있어(원격 임베딩 서버 전용)
+    세 줄짜리 이력서와 자세한 경력이 같은 53점이 됐다. 입력 분량과 수치가 든 사실을 함께 본다:
+      기본 35 + 서사 분량(150자 미만 0 / 400자 미만 8 / 그 이상 15) + 수치 사실 개당 3(최대 9)
+      + 업무 수 개당 2(최대 8) + NCS 매칭 10 + 노출도 출처당 10(최대 20), 상한 90.
+    """
+    length = len(re.sub(r"\s+", " ", career_text).strip())
+    score = 35
+    score += 15 if length >= 400 else 8 if length >= 150 else 0
+    score += min(9, 3 * len(_QUANT_FACT.findall(career_text)))
+    score += min(8, 2 * task_count)
+    score += 10 if ncs_matched else 0
+    score += min(20, 10 * exposure_sources)
+    return min(90, score)
+
+
 async def diagnose(
     career_text: str,
     job_title: str | None = None,
@@ -348,9 +401,7 @@ async def diagnose(
         ]
     )
 
-    confidence = 45 + min(10, len(tasks) * 2)
-    confidence += 15 if ncs_matches else 0
-    confidence += min(20, len(empirical_scores) * 10)
+    confidence = evidence_confidence(career_text, len(tasks), bool(ncs_matches), len(empirical_scores))
     formula_note = (
         f"업무별 점수 {calculation['task_based_score']}점을 중심으로"
         + (
@@ -365,7 +416,7 @@ async def diagnose(
     return RiskDiagnosis(
         job_title=analysis.job_title,
         rationale=formula_note,
-        confidence=min(90, confidence),
+        confidence=confidence,
         tasks=tasks,
         sources=sources,
         **{

@@ -38,6 +38,18 @@ DROP_COLUMNS = ["EMP_CHARGER_DPT", "CONTACT_TELNO"]
 
 _YY_DATE_RE = re.compile(r"(\d{2})-(\d{2})-(\d{2})")
 
+# 원천이 표현하지 못한 문자(가운뎃점·이모지·☎ 등)가 전각 물음표 '？'로 들어온다 —
+# '마케팅 및 광고？홍보 관리자', '？？오늘의기업 참여업체？？'. 한글 사이는 가운뎃점으로, 나머지는 지운다
+_LOST_CHAR_BETWEEN_HANGUL = re.compile(r"(?<=[가-힣])？(?=[가-힣])")
+_LOST_CHAR = re.compile(r"？+")
+
+
+def clean_lost_chars(value):
+    """'광고？홍보' → '광고·홍보', '연락처 ？ 010' → '연락처  010'. 문자열이 아니면 그대로."""
+    if not isinstance(value, str):
+        return value
+    return _LOST_CHAR.sub("", _LOST_CHAR_BETWEEN_HANGUL.sub("·", value))
+
 
 def _to_iso_date(value) -> str | None:
     """'26-10-04', '채용시까지  26-10-04' → '2026-10-04'. 날짜가 없으면 None.
@@ -113,6 +125,8 @@ def collect(max_records: int | None = None, drop_closed: bool = True) -> None:
 
     total = len(all_rows)
     for r in all_rows:
+        for key, value in r.items():
+            r[key] = clean_lost_chars(value)
         r["REG_DATE"] = _to_iso_date(r.get("REG_DT"))
         r["CLOSE_DATE"] = _to_iso_date(r.get("CLOSE_DT"))
         for col in DROP_COLUMNS:

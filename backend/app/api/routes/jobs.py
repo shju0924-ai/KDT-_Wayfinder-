@@ -2,7 +2,7 @@
 
 인접 직무 전환형(adjacent):
     확정된 역량 프로필 → query 임베딩 → pgvector 유사 공고 top-k → 벡터 순위 상위부터
-    TOP_K 건씩 묶어 LLM이 수요 전망·전환 난이도·기여 역량 판정 → 이어지는 역량이 충분한 후보만 남김.
+    TOP_K 건 단위로 직무마다 LLM이 수요 전망·전환 난이도·기여 역량 판정 → 이어지는 역량이 충분한 후보만 남김.
     fit_score 는 역량↔공고 코사인 유사도를 백분율로 환산한 값.
 
 교육 후 직무 전환형(training) — 검색 방향을 뒤집는다:
@@ -27,8 +27,8 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 TOP_K = 5
-# 격차 판정에서 걸러질 후보를 감안해 판정 대상은 넉넉히 둔다 — TOP_K 건씩 묶어 최대 2회 호출.
-# 첫 묶음에서 TOP_K 건이 모두 통과하면 두 번째 호출은 하지 않는다(로컬 모델은 호출당 1~2분).
+# 격차 판정에서 걸러질 후보를 감안해 판정 대상은 넉넉히 둔다 — TOP_K 건 단위로 최대 2단위.
+# 첫 단위에서 TOP_K 건이 모두 통과하면 두 번째 단위는 판정하지 않는다(로컬 모델은 직무당 30초~1분).
 SELECT_K = TOP_K * 2
 # 판정 전에 현재 직무·중복 직무를 걸러내므로 검색은 더 넉넉히 한다.
 SEARCH_K = TOP_K * 8
@@ -229,7 +229,7 @@ async def _match_adjacent_transition(profile: SkillProfile, exclude_job: str | N
         snippets = [s for s in dict.fromkeys([rep.get("snippet_raw") or "", *extra]) if s.strip()]
         rep["snippet"] = "\n".join(f"- {s}" for s in snippets)[: llm.JUDGE_SNIPPET_CHARS]
 
-    # 벡터 유사도 순위 상위부터 TOP_K 건씩 묶어 판정하고, 인접 판정을 통과한 것만 남긴다.
+    # 벡터 유사도 순위 상위부터 TOP_K 건 단위로 직무마다 판정하고, 인접 판정을 통과한 것만 남긴다.
     matches: list[JobMatch] = []
     titles_en: list[str | None] = []  # 카드별 영문 표준 직업명 — AI 노출도 매칭용
     # 이어지는 역량이 1개뿐인 후보 — 엄격 기준 결과가 너무 적을 때만 '근거 약함'으로 채운다
@@ -239,7 +239,7 @@ async def _match_adjacent_transition(profile: SkillProfile, exclude_job: str | N
             break
         batch = candidates[start : start + TOP_K]
         try:
-            judgements = await llm.judge_job_matches(skill_names, exclude_job, batch)
+            judgements = await _judge_batch(skill_names, exclude_job, batch)
         except Exception as e:
             # LLM 자체가 죽은 경우(키 오류·Ollama 미기동 등) '결과 0건'으로 숨기지 않는다
             if matches:
@@ -268,6 +268,18 @@ async def _match_adjacent_transition(profile: SkillProfile, exclude_job: str | N
         matches.append(match)
         titles_en.append(judged.get("occupation_title_en"))
     return await _with_ai_exposure(matches, titles_en)
+
+
+async def _judge_batch(skill_names: list[str], exclude_job: str | None, batch: list[dict]) -> list[dict]:
+    """후보를 직무 하나씩 판정한다.
+
+    묶음 판정(공고 TOP_K 건을 한 번에)은 4b가 판정 내용을 한 칸씩 다음 직무 것으로 밀려 써, 부족 역량과
+    영문 직업명이 다른 직무 카드에 붙었다 — 직무 번호(job_no)를 받아도 번호만 순서대로 적고 내용은 밀렸다
+    (e2e 실측). 하나씩 부르면 프롬프트가 짧아져 묶음과 걸리는 시간도 비슷했다(로컬 4b, 5명 기준 85분 → 62분)."""
+    judgements: list[dict] = []
+    for row in batch:
+        judgements += await llm.judge_job_matches(skill_names, exclude_job, [row])
+    return judgements
 
 
 async def _with_ai_exposure(matches: list[JobMatch], titles_en: list[str | None]) -> list[JobMatch]:
