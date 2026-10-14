@@ -7,6 +7,7 @@ import type {
   LearningRoadmap,
   ParsedResume,
   RiskDiagnosis,
+  SkillItem,
   SkillProfile,
   SurveyCareer,
   SurveyInput,
@@ -31,9 +32,13 @@ export const composeSurvey = (survey: SurveyInput) =>
 export const diagnoseRisk = (input: CareerInput) =>
   api.post<RiskDiagnosis>("/diagnosis/risk", input).then((r) => r.data);
 
-// STEP 2
+// STEP 2 — 경력 → NCS 능력단위 연결(근거 구절 포함)
 export const generateProfile = (input: CareerInput) =>
   api.post<SkillProfile>("/profile", input).then((r) => r.data);
+
+/** 빠진 역량을 직접 추가할 때 — NCS 능력단위명·직무명 검색 */
+export const searchNcsUnits = (q: string) =>
+  api.get<SkillItem[]>("/profile/units", { params: { q }, timeout: 30_000 }).then((r) => r.data);
 
 // STEP 3 — 선택한 탐색 경로에 맞춰 공고를 찾고 현재 직무는 제외한다
 export const matchJobs = (

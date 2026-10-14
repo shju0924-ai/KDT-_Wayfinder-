@@ -1,5 +1,7 @@
-// STEP 2 — 역량 프로필 카드. 핵심 UX: AI가 분해한 역량을 사용자가 직접 검토·수정·확정한다.
+// STEP 2 — 역량 프로필 카드. 핵심 UX: AI가 경력에서 찾은 NCS 능력단위를 사용자가 직접 검토·수정·확정한다.
+// 능력단위마다 근거가 된 경력 구절을 보여 주고, 빠진 것은 NCS 검색으로 찾아 추가한다.
 import { useState } from "react";
+import { searchNcsUnits } from "../../api/client";
 import type { SkillItem } from "../../types/api";
 import { CheckIcon, PlusIcon, XIcon } from "../icons";
 
@@ -11,39 +13,59 @@ interface Props {
 
 export default function SkillProfileCard({ initial, locked, onConfirm }: Props) {
   const [skills, setSkills] = useState<SkillItem[]>(initial);
-  const [draft, setDraft] = useState("");
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<SkillItem[] | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
 
-  const remove = (name: string) => setSkills((s) => s.filter((x) => x.name !== name));
+  const held = new Set(skills.map((s) => s.ncs_code));
+  const remove = (code: string) => setSkills((s) => s.filter((x) => x.ncs_code !== code));
+  const add = (unit: SkillItem) => {
+    if (held.has(unit.ncs_code)) return;
+    setSkills((s) => [...s, { ...unit, user_added: true, evidence: null, confirmed: false }]);
+  };
 
-  const add = () => {
-    const name = draft.trim();
-    if (!name || skills.some((s) => s.name === name)) return;
-    // 분류 "직접 추가"는 백엔드 jobs.py USER_ADDED_CATEGORY 와 같아야 한다 — 이 역량은 근거 문구를 검색어에서 뺀다
-    setSkills((s) => [
-      ...s,
-      { name, category: "직접 추가", evidence: "사용자가 직접 추가한 역량", confirmed: false },
-    ]);
-    setDraft("");
+  const search = async () => {
+    const q = query.trim();
+    if (!q) return;
+    setSearching(true);
+    setSearchError(null);
+    try {
+      setResults(await searchNcsUnits(q));
+    } catch {
+      setSearchError("검색하지 못했어요. 잠시 후 다시 시도해 주세요.");
+    } finally {
+      setSearching(false);
+    }
   };
 
   return (
     <div className="card">
       <div className="card-eyebrow">STEP 2 · 역량 프로필</div>
-      <h3>경력에서 발견한 전이 가능 역량</h3>
+      <h3>경력에서 확인한 직무 능력</h3>
+      <p className="skill-intro">
+        국가직무능력표준(NCS)의 능력단위로 정리했어요. 경력의 어느 구절에서 찾았는지 함께 보여 드려요.
+      </p>
       <div className="skill-list">
         {skills.map((s) => (
-          <div className="skill-row" key={s.name}>
+          <div className="skill-row" key={s.ncs_code}>
             <div className="skill-main">
               <div className="skill-name">
                 {s.name}
-                <span className="tag">{s.category}</span>
+                <span className="tag" title={s.ncs_path}>
+                  {s.ncs_job}
+                </span>
               </div>
-              <div className="skill-evidence">근거 — {s.evidence}</div>
+              {s.user_added || !s.evidence ? (
+                <div className="skill-evidence">직접 추가 — {s.definition}</div>
+              ) : (
+                <div className="skill-evidence">근거 — “{s.evidence}”</div>
+              )}
             </div>
             {!locked && (
               <button
                 className="skill-remove"
-                onClick={() => remove(s.name)}
+                onClick={() => remove(s.ncs_code)}
                 aria-label={`${s.name} 삭제`}
               >
                 <XIcon />
@@ -51,26 +73,61 @@ export default function SkillProfileCard({ initial, locked, onConfirm }: Props) 
             )}
           </div>
         ))}
+        {skills.length === 0 && (
+          <div className="skill-evidence">
+            경력에서 찾은 능력단위가 없어요. 아래에서 해 본 일을 검색해 추가해 주세요.
+          </div>
+        )}
       </div>
 
       {!locked && (
-        <div className="skill-add">
-          <input
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && add()}
-            placeholder="빠진 역량이 있다면 직접 추가하세요"
-          />
-          <button className="btn ghost" onClick={add} disabled={!draft.trim()}>
-            <PlusIcon /> 추가
-          </button>
-        </div>
+        <>
+          <div className="skill-add">
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && search()}
+              placeholder="빠진 능력이 있다면 검색해 추가하세요 (예: 채권관리, 재고관리)"
+            />
+            <button className="btn ghost" onClick={search} disabled={!query.trim() || searching}>
+              {searching ? "검색 중…" : "검색"}
+            </button>
+          </div>
+          {searchError && <div className="skill-evidence">{searchError}</div>}
+          {results && (
+            <div className="skill-results">
+              {results.length === 0 && <div className="skill-evidence">찾은 능력단위가 없어요.</div>}
+              {results.map((u) => (
+                <div className="skill-row" key={u.ncs_code}>
+                  <div className="skill-main">
+                    <div className="skill-name">
+                      {u.name}
+                      <span className="tag" title={u.ncs_path}>
+                        {u.ncs_job}
+                      </span>
+                    </div>
+                    <div className="skill-evidence">{u.definition}</div>
+                  </div>
+                  <button
+                    className="btn ghost"
+                    onClick={() => add(u)}
+                    disabled={held.has(u.ncs_code)}
+                    aria-label={`${u.name} 추가`}
+                  >
+                    {held.has(u.ncs_code) ? <CheckIcon /> : <PlusIcon />}
+                    {held.has(u.ncs_code) ? "추가됨" : "추가"}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
       )}
 
       <div className="card-foot">
         <span className="note">
           {locked
-            ? `${skills.length}개 역량으로 확정됨`
+            ? `${skills.length}개 능력으로 확정됨`
             : "확정 전에 자유롭게 삭제·추가할 수 있어요. 선택은 언제나 당신의 몫이에요."}
         </span>
         {locked ? (

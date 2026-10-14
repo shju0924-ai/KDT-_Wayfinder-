@@ -41,7 +41,7 @@ def compose_career_text(survey: SurveyInput) -> str:
 
     experience = survey.experience.strip()
     if experience:
-        parts.append(f"가장 자신 있게 설명할 수 있는 경험은 다음과 같습니다.\n{experience}")
+        parts.append(f"{_EXPERIENCE_HEAD}\n{experience}")
 
     # 강점은 고정 선택지 문구('문서·데이터 관리')라 업무처럼 쓰면 진단이 이를 업무로 쪼갰다(e2e 실측) —
     # 자기 평가임을 문장에 밝혀, 업무는 위 경험 서술에서만 나오게 한다
@@ -55,6 +55,25 @@ def compose_career_text(survey: SurveyInput) -> str:
 
     aspiration = (survey.aspiration or "").strip()
     if aspiration:
-        parts.append(f"앞으로 해보고 싶은 일은 다음과 같습니다.\n{aspiration}")
+        parts.append(f"{_ASPIRATION_HEAD}\n{aspiration}")
 
     return "\n\n".join(parts)
+
+
+_EXPERIENCE_HEAD = "가장 자신 있게 설명할 수 있는 경험은 다음과 같습니다."
+_ASPIRATION_HEAD = "앞으로 해보고 싶은 일은 다음과 같습니다."
+
+
+def work_evidence_text(career_text: str) -> str:
+    """경력 서사에서 '실제로 한 일'의 근거로 쓸 부분 — 설문으로 조립한 서사면 경험 서술만, 아니면 전부.
+
+    STEP 2 능력단위 연결은 해 본 일만 근거로 삼는다. 설문의 강점(자기 평가)·고민·희망까지 넣으면
+    '설비를 다루는 경험을 살리고 싶어요'(희망)가 'CNC선반 조작'의 근거로 쓰였다(페르소나 시험)."""
+    head = f"{_EXPERIENCE_HEAD}\n"
+    if head not in career_text:
+        return career_text
+    rest = career_text.split(head, 1)[1]
+    # 경험 서술 안에 빈 줄이 있을 수 있어 '\n\n' 이 아니라 다음 문단의 고정 머리말에서 자른다
+    for nxt in ("\n\n설문에서 고른 제 강점", "\n\n지금 커리어에서 가장 고민되는 점은", f"\n\n{_ASPIRATION_HEAD}"):
+        rest = rest.split(nxt, 1)[0]
+    return rest.strip()

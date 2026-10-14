@@ -7,13 +7,17 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import diagnosis, jobs, profile, roadmap
 from app.core.config import settings
-from app.services import automation
+from app.services import automation, ncs_jobs
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     # STEP 1 진단의 NCS 매칭 색인을 미리 준비한다(첫 실행 2분 남짓, 이후 디스크 캐시) — 요청은 막지 않는다
     threading.Thread(target=automation.warm_ncs_index, daemon=True).start()
+    # 교육 후 전환형의 NCS 직무 후보 색인(약 400건, 디스크 캐시)
+    threading.Thread(target=ncs_jobs.warm_index, daemon=True).start()
+    # 직무별 AI 노출도 매칭용 직업명 색인(약 3,300건, 디스크 캐시)
+    threading.Thread(target=automation.warm_occupation_index, daemon=True).start()
     yield
 
 

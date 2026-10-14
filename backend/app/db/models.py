@@ -77,6 +77,13 @@ class NcsUnit(Base):
     small_category: Mapped[str | None] = mapped_column(String(200), nullable=True)
     sub_category: Mapped[str | None] = mapped_column(String(200), index=True, nullable=True)
     source_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    # STEP 2 경력 → 능력단위 연결(data-pipeline embedding/embed_ncs.py). 구버전·삭제·중복 단위는 NULL
+    embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(EMBEDDING_DIM), nullable=True, deferred=True, comment="'능력단위명 — 정의' — 직무 추천 점수용"
+    )
+    embedding_domain: Mapped[list[float] | None] = mapped_column(
+        Vector(EMBEDDING_DIM), nullable=True, deferred=True, comment="'분야 경로 | 능력단위명 — 정의' — 경력 구절 후보 검색용"
+    )
     collected_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 

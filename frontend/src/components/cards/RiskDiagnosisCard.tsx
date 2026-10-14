@@ -87,7 +87,8 @@ export default function RiskDiagnosisCard({ data }: Props) {
                 {s.source}
               </a>{" "}
               — {s.label}
-              {s.score != null && ` · ${s.score}`}
+              {/* 직무 카드와 같은 값 — 직업 간 순위로 환산한 0~100점(100에 가까울수록 AI 대체 가능성 높음) */}
+              {s.score != null && ` · AI 노출도 ${s.score} / 100`}
               {s.note && <small> ({s.note})</small>}
             </li>
           ))}

@@ -31,7 +31,8 @@ export default function JobMatchList({ jobs, searchTrack, selected, onSelect }: 
       </h3>
       <p className="job-estimate-note">
         수요 전망과 전환 난이도는 채용공고 및 보유 역량을 바탕으로 AI가 추정한 참고값입니다.
-        AI 노출도는 ILO·Anthropic 공개 자료의 직업별 점수로, 고용 대체 확률이 아니며 해석은 직접 판단해 주세요.
+        AI 노출도(0~100)는 ILO·Anthropic 공개 자료를 직업 간 순위로 환산한 값으로, 100에 가까울수록 AI로
+        대체될 가능성이 높은 직무입니다.
       </p>
       <div className="job-list">
         {jobs.map((job) => {
@@ -62,6 +63,11 @@ export default function JobMatchList({ jobs, searchTrack, selected, onSelect }: 
               <div className="job-head">
                 <span className="job-title">{job.job_title}</span>
                 <div className="job-meta">
+                  {job.license_required && (
+                    <span className="tag" title="국가 면허를 취득해야 일할 수 있는 직업입니다">
+                      면허 직업
+                    </span>
+                  )}
                   <span className="tag" title="채용공고와 일반 직종 정보를 바탕으로 한 AI 추정">
                     AI 추정 수요 전망 {job.demand_outlook}
                   </span>
@@ -106,11 +112,11 @@ export default function JobMatchList({ jobs, searchTrack, selected, onSelect }: 
                       <div className="fit-bar" aria-hidden>
                         <div className="fit-fill" style={{ width: `${job.ai_exposure_score}%` }} />
                       </div>
-                      <span className="fit-num">AI 노출도 {job.ai_exposure_score}</span>
+                      <span className="fit-num">AI 노출도 {job.ai_exposure_score} / 100</span>
                     </div>
                     <small>
                       {job.ai_exposure_sources
-                        .map((s) => `${s.source}: ${s.label}${s.score != null ? ` ${s.score}` : ""}`)
+                        .map((s) => `${s.source}: ${s.label}${s.score != null ? ` ${s.score} / 100` : ""}`)
                         .join(" · ")}
                     </small>
                   </>

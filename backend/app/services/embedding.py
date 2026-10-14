@@ -289,6 +289,58 @@ async def search_similar_jobs(
     )
 
 
+# 역량 하나로 공고를 찾고, 직무명마다 그 역량과 가장 가까운 공고 :top_n 건만 남긴다(청크는 공고 단위로 합친다).
+# similarity 는 카드 적합도용 — 역량 하나가 아니라 프로필 전체 벡터와의 유사도다.
+# 긴 공고의 두 번째 이후 청크(#c2~, 4,804행)는 대부분 연락처·급여·제출서류 같은 공통 안내문이라 뺀다.
+# 짧은 역량명('웹 접근성 확보')이 이런 안내문 청크에 0.45~0.50으로 걸려, 공고가 많은 직무(재가 요양보호사)가
+# 거의 모든 역량에 연결돼 웹 퍼블리셔의 인접 후보 1위가 됐다. 업무 내용은 단일 행과 첫 청크(#c1)에 있다.
+_CONTINUATION_CHUNK = r"#c([2-9]|[0-9]{2,})$"
+_SKILL_JOB_SQL = text(
+    f"""
+    WITH c AS (
+        SELECT split_part(source_id, '#', 1) AS posting_id,
+               job_title, company, region, source_url,
+               left(required_skills_text, 400) AS snippet,
+               1 - (embedding <=> CAST(:skillvec AS vector)) AS skill_sim,
+               1 - (embedding <=> CAST(:profilevec AS vector)) AS similarity
+        FROM job_postings
+        WHERE embedding IS NOT NULL AND source_id !~ '{_CONTINUATION_CHUNK}'
+        ORDER BY embedding <=> CAST(:skillvec AS vector)
+        LIMIT :candidates
+    ), p AS (
+        SELECT DISTINCT ON (posting_id) * FROM c ORDER BY posting_id, skill_sim DESC
+    ), r AS (
+        SELECT *, row_number() OVER (PARTITION BY job_title ORDER BY skill_sim DESC) AS rn FROM p
+    )
+    SELECT posting_id, job_title, company, region, source_url, snippet, skill_sim, similarity
+    FROM r WHERE rn <= :top_n
+    """
+)
+
+
+async def search_jobs_per_skill(
+    skill_texts: list[str], profile_text: str, top_n: int = 3
+) -> list[list[dict]]:
+    """역량마다 따로 공고를 찾는다(STEP 3 인접 직무) — 역량 순서대로, 직무명마다 상위 top_n 공고.
+
+    역량을 한 문장으로 합쳐 한 번 검색하면 '고객 응대' 같은 흔한 역량이 검색 방향을 끌고 가,
+    다른 역량과 이어지는 직무가 후보에 오르지 못했다. 직무별 집계는 호출부(jobs.py)가 한다."""
+    if not any(t.strip() for t in skill_texts) or not profile_text.strip():
+        return [[] for _ in skill_texts]
+    vecs = await embed_queries([profile_text, *skill_texts])
+    profilevec = json.dumps(vecs[0])
+
+    async def one(vec: list[float]) -> list[dict]:
+        return await run_db(
+            _execute_hnsw,
+            _SKILL_JOB_SQL.text,
+            {"skillvec": json.dumps(vec), "profilevec": profilevec, "top_n": top_n},
+            JOB_CANDIDATES,
+        )
+
+    return list(await asyncio.gather(*(one(v) for v in vecs[1:])))
+
+
 async def search_similar_courses(gap_text: str, limit: int = 5) -> list[dict]:
     """역량 격차 텍스트 → 유사한 훈련과정 top-k (STEP 4).
 
@@ -316,7 +368,8 @@ async def search_similar_courses(gap_text: str, limit: int = 5) -> list[dict]:
 _NCS_LABEL_SQL = text(
     """
     SELECT left(ncs_code, 8) AS cd, max(sub_category) AS sub,
-           string_agg(unit_name, ', ' ORDER BY ncs_code) FILTER (WHERE unit_name NOT LIKE '%구버전%') AS units
+           string_agg(unit_name, ', ' ORDER BY ncs_code)
+               FILTER (WHERE unit_name NOT LIKE '%구버전%' AND unit_name NOT LIKE '%삭제%') AS units
     FROM ncs_units
     WHERE left(ncs_code, 8) = ANY(:codes)
     GROUP BY 1

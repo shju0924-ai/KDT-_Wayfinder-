@@ -169,6 +169,13 @@ CREATE TABLE IF NOT EXISTS ncs_units (
 );
 CREATE INDEX IF NOT EXISTS idx_ncs_units_name ON ncs_units (unit_name);
 CREATE INDEX IF NOT EXISTS idx_ncs_units_sub_category ON ncs_units (sub_category);
+-- STEP 2 경력 → 능력단위 연결(embedding/embed_ncs.py 가 채움, 구버전·삭제·중복 단위는 NULL)
+--   embedding         '능력단위명 — 정의'            — 직무 추천 점수용
+--   embedding_domain  '분야 경로 | 능력단위명 — 정의' — 경력 구절로 후보를 찾는 검색용
+ALTER TABLE ncs_units ADD COLUMN IF NOT EXISTS embedding vector({EMBEDDING_DIM});
+ALTER TABLE ncs_units ADD COLUMN IF NOT EXISTS embedding_domain vector({EMBEDDING_DIM});
+CREATE INDEX IF NOT EXISTS idx_ncs_units_embedding_domain_cos
+    ON ncs_units USING hnsw (embedding_domain vector_cosine_ops);
 
 CREATE TABLE IF NOT EXISTS automation_occupation_scores (
     id SERIAL PRIMARY KEY,
@@ -316,6 +323,19 @@ def upsert_ncs_units(conn: psycopg.Connection, rows: list[dict]) -> int:
         %(sub_category)s, %(source_url)s
     )
     ON CONFLICT (ncs_code) DO UPDATE SET
+        -- 임베딩 입력(이름·정의·분야)이 바뀐 단위는 벡터를 비워 embed_ncs 가 다시 계산하게 한다
+        embedding = CASE WHEN (ncs_units.unit_name, ncs_units.unit_definition, ncs_units.large_category,
+                               ncs_units.middle_category, ncs_units.small_category, ncs_units.sub_category)
+                              IS NOT DISTINCT FROM
+                              (EXCLUDED.unit_name, EXCLUDED.unit_definition, EXCLUDED.large_category,
+                               EXCLUDED.middle_category, EXCLUDED.small_category, EXCLUDED.sub_category)
+                         THEN ncs_units.embedding END,
+        embedding_domain = CASE WHEN (ncs_units.unit_name, ncs_units.unit_definition, ncs_units.large_category,
+                                      ncs_units.middle_category, ncs_units.small_category, ncs_units.sub_category)
+                                     IS NOT DISTINCT FROM
+                                     (EXCLUDED.unit_name, EXCLUDED.unit_definition, EXCLUDED.large_category,
+                                      EXCLUDED.middle_category, EXCLUDED.small_category, EXCLUDED.sub_category)
+                                THEN ncs_units.embedding_domain END,
         unit_name = EXCLUDED.unit_name,
         unit_definition = EXCLUDED.unit_definition,
         unit_level = EXCLUDED.unit_level,

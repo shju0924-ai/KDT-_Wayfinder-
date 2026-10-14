@@ -224,23 +224,26 @@ export default function Chat({ onJourney, onNewChat }: Props) {
     }
   };
 
-  // ── STEP 2: 역량 분해 요청 ───────────────────────────────
+  // ── STEP 2: 경력 → NCS 능력단위 연결 요청 ──────────────────
   const handleAction = async (label: string) => {
     if (!career || draftSkills) return;
     push({ role: "user", text: label });
     setBusy(true);
     try {
-      const profile = await generateProfile(career);
+      // STEP 1 진단 업무를 함께 보내, 업무에 붙은 NCS 코드도 능력단위 후보로 쓰게 한다
+      const profile = await generateProfile({ ...career, diagnosed_tasks: risk?.tasks ?? [] });
       setDraftSkills(profile.skills);
-      // 이력서·자유 텍스트 경로는 직무명 입력이 없으므로, 서버가 경력 서사에서 뽑은 현재 직무를 기억해
-      // STEP 3에서 '같은 직무' 후보를 걸러내는 데 쓴다
-      if (!career.current_job_title && profile.current_job_title) {
-        setCareer({ ...career, current_job_title: profile.current_job_title });
+      // 이력서·자유 텍스트 경로는 직무명 입력이 없으므로, STEP 1 진단이 경력 서사에서 뽑은 직무명을 기억해
+      // STEP 3에서 '같은 직무' 후보를 걸러내는 데 쓴다. STEP 2 요청 뒤에 넣는 이유: 직무명이 있으면 STEP 2가
+      // 그 이름을 검색 맥락으로 쓰는데, 이력서 경로는 첫 줄을 맥락으로 쓰는 쪽으로 검증했다
+      const currentJob = profile.current_job_title ?? risk?.job_title;
+      if (!career.current_job_title && currentJob) {
+        setCareer({ ...career, current_job_title: currentJob });
       }
       push(
         {
           role: "assistant",
-          text: "경력 서사에서 다른 직무로도 옮겨갈 수 있는 역량들을 찾아냈어요.\n제가 잘못 읽었거나 빠뜨린 게 있다면 직접 고쳐주세요 — 최종 판단은 언제나 당신이 합니다.",
+          text: "경력에서 해 오신 일을 국가직무능력표준(NCS)의 능력단위로 정리했어요. 같은 능력단위를 쓰는 다른 직무로 옮겨 갈 수 있어요.\n제가 잘못 읽었거나 빠뜨린 게 있다면 직접 고쳐주세요 — 최종 판단은 언제나 당신이 합니다.",
         },
         { role: "assistant", card: "skills" },
       );

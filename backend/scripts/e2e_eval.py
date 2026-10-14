@@ -46,11 +46,25 @@ def _llm_texts(profile: dict, adjacent: list, training: list, roadmaps: list, ri
     (\uc2e4\uce21: \uc2e4\uc81c \uacfc\uc815\uba85 '\uc138\ubb34\ub97c \uc54c\uba74 \ube44\uc988\ub2c8\uc2a4\uac00 \u901a\ud55c\ub2e4'\uc758 '\u901a'\uc774 \ud55c\uc790 2\uac74\uc73c\ub85c \uc7a1\ud614\ub2e4)."""
     parts: list[str] = [risk.get("job_title") or ""]
     parts += [f"{t['name']} {t['rationale']}" for t in risk["tasks"]]
-    parts += [f"{s['name']} {s['evidence']}" for s in profile["skills"]]
+    parts += [s.get("evidence") or "" for s in profile["skills"]]  # 역량명은 NCS 원문, 근거 인용만 LLM 출력
     parts += [" ".join(j["matched_skills"] + j["missing_skills"]) for j in adjacent]
     parts += [" ".join([j["job_title"], *j["missing_skills"]]) for j in training]  # \uad50\uc721 \ud2b8\ub799 \uc9c1\ubb34\uba85\uc740 LLM \uc81c\uc548
     parts += [i["skill_gap"] for r in roadmaps for i in r["items"]]
     return "\n".join(parts)
+
+
+# 접속어에서 끊긴 이름 — '매장 재고 정리 및'
+_DANGLING = re.compile(r"(및|과|와|또는|그리고|[,·/])\s*$")
+# 결과 기본 저장 위치 — 3차는 --json 없이 돌려 원인 분석에 쓸 원자료가 남지 않았다
+RESULT_DIR = Path(__file__).resolve().parents[1] / "e2e_results"
+# 이 수 이상의 페르소나에게 같은 이름으로 나온 교육 후 전환 직무는 '범용 반복'으로 집계한다
+REPEATED_TARGET_MIN = 3
+
+
+def _dangling_names(risk: dict, profile: dict, adjacent: list, training: list) -> list[str]:
+    names = [t["name"] for t in risk["tasks"]] + [s["name"] for s in profile["skills"]]
+    names += [x for j in adjacent + training for x in j["missing_skills"]]
+    return [n for n in names if _DANGLING.search(n)]
 
 
 class _Collect(logging.Handler):
@@ -87,12 +101,11 @@ async def run_persona(c: httpx.AsyncClient, key: str, survey: dict, sequential: 
         career = (await timed("s1", c.post("/api/diagnosis/survey", json=survey)))["career_text"]
         job_title = survey["job_title"]
     career_input = {"raw_text": career, "current_job_title": job_title}
-    # STEP 1 진단과 STEP 2 역량 분해는 같은 경력 서사만 쓰므로 동시에 보낸다
-    risk, profile = await _gather(
-        sequential,
-        timed("s1_risk", c.post("/api/diagnosis/risk", json=career_input)),
-        timed("s2", c.post("/api/profile", json=career_input)),
-    )
+    # 화면과 같은 순서 — STEP 2 능력단위 연결은 STEP 1 진단 업무의 NCS 코드도 후보로 받는다
+    risk = await timed("s1_risk", c.post("/api/diagnosis/risk", json=career_input))
+    profile = await timed("s2", c.post("/api/profile", json={**career_input, "diagnosed_tasks": risk["tasks"]}))
+    # 화면(Chat.tsx)처럼 이력서 경로는 STEP 1 진단의 직무명을 현재 직무로 쓴다 — STEP 3 같은 직무 제외
+    profile["current_job_title"] = profile.get("current_job_title") or risk.get("job_title")
     # 두 트랙·로드맵은 서로 독립 — 동시에 보내 GPU 병렬 처리(OLLAMA_NUM_PARALLEL)를 쓴다
     adjacent, training = await _gather(
         sequential,
@@ -113,12 +126,16 @@ async def run_persona(c: httpx.AsyncClient, key: str, survey: dict, sequential: 
         "risk": {
             "score": risk["risk_score"], "task_based": risk["task_based_score"], "confidence": risk["confidence"],
             "shares": (risk["automation_share"], risk["augmentation_share"], risk["human_centered_share"]),
-            "tasks": [(t["name"], t["share_percent"], t["automation_score"], t["effect"], t["ncs_unit"]) for t in risk["tasks"]],
+            "tasks": [(t["name"], t["share_percent"], t["automation_score"], t["effect"], t["ncs_unit"], t.get("source_quote")) for t in risk["tasks"]],
             "sources": [s["source"] for s in risk["sources"]],
         },
-        "skills": [(s["name"], s["category"]) for s in profile["skills"]],
-        "adjacent": [(j["job_title"], j["fit_score"], j["ai_exposure_score"], j["matched_skills"], j["missing_skills"], j["weak_reasons"]) for j in adjacent],
-        "training": [(j["job_title"], j["fit_score"], j["ai_exposure_score"], j["missing_skills"], j["weak_reasons"]) for j in training],
+        "skills": [(s["name"], s["ncs_job"], s["evidence"]) for s in profile["skills"]],
+        "adjacent": [(j["job_title"], j["fit_score"], j["ai_exposure_score"], j["matched_skills"], j["missing_skills"],
+                      j["weak_reasons"], [(s["source"], s["label"], s["score"]) for s in j["ai_exposure_sources"]],
+                      j["license_required"]) for j in adjacent],
+        "training": [(j["job_title"], j["fit_score"], j["ai_exposure_score"], j["matched_skills"], j["missing_skills"],
+                      j["weak_reasons"], [(s["source"], s["label"], s["score"]) for s in j["ai_exposure_sources"]],
+                      j["license_required"], j.get("requirement_excerpt")) for j in training],
         "roadmap": [(r["target_job"], [(i["skill_gap"], i["course"]["name"] if i["course"] else None, i.get("weak_reason")) for i in r["items"]])
                     for r in roadmaps],
         "metrics": {
@@ -134,6 +151,11 @@ async def run_persona(c: httpx.AsyncClient, key: str, survey: dict, sequential: 
             "foreign_left": len(_ACCENTED.findall(llm_text)),
             "weak_jobs": sum(1 for j in adjacent + training if j["weak_reasons"]),
             "weak_courses": sum(1 for i in items if i.get("weak_reason")),
+            # 3차까지 사람이 세던 지표 — 노출도 0.0·미연결, 잘린 이름, 면허 직업
+            "exposure_zero": sum(1 for j in adjacent + training if j["ai_exposure_score"] == 0),
+            "exposure_missing": sum(1 for j in adjacent + training if j["ai_exposure_score"] is None),
+            "dangling_names": _dangling_names(risk, profile, adjacent, training),
+            "licensed_jobs": [j["job_title"] for j in adjacent + training if j["license_required"]],
         },
     }
 
@@ -146,7 +168,8 @@ async def main() -> None:
                     help=f"페르소나 세트, 쉼표로 여러 개 또는 all "
                          f"({', '.join(f'{k} {len(v)}명' for k, v in sets.items())})")
     ap.add_argument("--only")
-    ap.add_argument("--json", help="결과 JSON 경로 — 페르소나가 끝날 때마다 덮어써 중간에 멈춰도 끝난 결과는 남는다")
+    ap.add_argument("--json", help="결과 JSON 경로(기본 e2e_results/<날짜시각>_<세트>.json) — 페르소나가 끝날 때마다 "
+                                   "덮어써 중간에 멈춰도 끝난 결과는 남는다. 같은 이름 .log.txt 에 앱 로그도 남긴다")
     ap.add_argument("--sequential", action="store_true", help="페르소나·요청을 하나씩 실행 (로컬 CPU용)")
     args = ap.parse_args()
 
@@ -155,11 +178,19 @@ async def main() -> None:
     except personas.PersonaError as e:
         ap.error(str(e))
     done: list[dict] = []
+    if not args.json:
+        stamp = time.strftime("%Y%m%d_%H%M")
+        only = f"_{args.only}" if args.only else ""
+        args.json = str(RESULT_DIR / f"{stamp}_{args.set.replace(',', '+')}{only}.json")
+    json_path = Path(args.json)
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    print("결과 저장:", json_path, flush=True)
+    collector = _Collect()
 
     def save_progress() -> None:
-        if args.json:
-            Path(args.json).write_text(json.dumps(done, ensure_ascii=False, indent=1), encoding="utf-8")
-    collector = _Collect()
+        json_path.write_text(json.dumps(done, ensure_ascii=False, indent=1), encoding="utf-8")
+        json_path.with_suffix(".log.txt").write_text("\n".join(collector.lines), encoding="utf-8")
+
     logging.getLogger("app").addHandler(collector)
     logging.getLogger("app").setLevel(logging.DEBUG if os.environ.get("EVAL_DEBUG") else logging.INFO)
 
@@ -206,14 +237,31 @@ async def main() -> None:
             print("실패한 페르소나:", ", ".join(failed))
 
     print("\n| 페르소나 | 시간(s) | 진단 점수 | 근거 충족도 | 인접 | 훈련 | 로드맵 과정 연결 | 직무 노출도 "
-          "| 근거 약함(직무/과정) | 한자/외국어 |")
-    print("|---|---|---|---|---|---|---|---|---|---|")
+          "| 노출도 0.0 | 근거 약함(직무/과정) | 한자/외국어 | 잘린 이름 | 면허 직업 |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for r in results:
         m = r["metrics"]
         print(f"| {r['persona']} | {r['total']} | {r['risk']['score']} | {r['risk']['confidence']} | "
               f"{m['adjacent_n']} | {m['training_n']} | "
               f"{m['roadmap_with_course']}/{m['roadmap_items']} | {m['jobs_with_exposure']}/{m['jobs_total']} | "
-              f"{m['weak_jobs']}/{m['weak_courses']} | {m['hanja_left']}/{m['foreign_left']} |")
+              f"{m['exposure_zero']} | {m['weak_jobs']}/{m['weak_courses']} | {m['hanja_left']}/{m['foreign_left']} | "
+              f"{', '.join(m['dangling_names']) or '-'} | {', '.join(m['licensed_jobs']) or '-'} |")
+
+    if results:
+        linked = sum(r["metrics"]["jobs_with_exposure"] for r in results)
+        total = sum(r["metrics"]["jobs_total"] for r in results)
+        adjacent = sum(r["metrics"]["adjacent_n"] for r in results)
+        print(f"\n노출도 연결 {linked}/{total} ({linked / (total or 1) * 100:.0f}%) · "
+              f"노출도 0.0 {sum(r['metrics']['exposure_zero'] for r in results)}건 · "
+              f"인접 직무 평균 {adjacent / len(results):.1f}")
+        # 여러 페르소나에게 같은 전환 직무가 나오면 경력을 반영하지 못한 범용 제안일 가능성이 크다
+        target_personas: dict[str, set[str]] = {}
+        for r in results:
+            for t in r["training"]:
+                target_personas.setdefault(t[0], set()).add(r["persona"])
+        repeated = {t: p for t, p in target_personas.items() if len(p) >= REPEATED_TARGET_MIN}
+        print(f"{REPEATED_TARGET_MIN}명 이상에게 반복된 전환 직무 {len(repeated)}종:",
+              "; ".join(f"{t}({len(p)}명)" for t, p in sorted(repeated.items(), key=lambda x: -len(x[1]))) or "없음")
     done[:] = results  # 병렬 실행은 끝난 순서로 쌓였다 — 마지막에 페르소나 순서로 다시 쓴다
     save_progress()
 

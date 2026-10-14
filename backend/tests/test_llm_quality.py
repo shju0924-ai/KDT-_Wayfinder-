@@ -222,13 +222,14 @@ def test_training_targets_keep_skill_names_with_parentheses(monkeypatch):
 
     async def fake_parse(schema, system, user, **kw):
         return schema(targets=[{
-            "job_title": "고객 경험 전략가", "rationale": "CS 경험이 이어짐", "transferable_skills": [name],
+            "job_no": 0, "rationale": "CS 경험이 이어짐", "transferable_skills": [name],
             "training_needs": ["고객 여정 분석"], "demand_outlook": "증가", "transition_difficulty": "보통",
-            "occupation_title_en": "Customer Experience Managers",
+            "license_required": False,
         }])
 
     monkeypatch.setattr(llm, "_parse", fake_parse)
-    out = asyncio.run(llm.suggest_training_targets([f"{name} (대인·협상) — 근거"], "콜센터 상담원", [name]))
+    candidates = [{"ncs_code": "02030201", "job_title": "고객관리", "path": "영업판매 > 마케팅 > 마케팅전략", "units": ""}]
+    out = asyncio.run(llm.suggest_training_targets(candidates, [f"{name} (대인·협상) — 근거"], "콜센터 상담원", [name]))
     assert out[0]["transferable_skills"] == [name]
 
 
@@ -256,25 +257,64 @@ def test_traits_are_not_skills():
     assert not llm.is_requirement_condition("CRM 시스템 활용 능력")
 
 
-def test_occupation_exposure_scores_match_by_english_title():
-    """후보 직무 카드의 AI 노출도 — 영문 직업명으로 출처별 점수를 찾고 평균을 낸다. 없으면 None."""
+def _exposure_rows():
     from types import SimpleNamespace
 
+    def row(source, title, code, score):
+        return SimpleNamespace(source=source, occupation_title=title, occupation_code=code, score=score, source_url="u")
+
+    aei = "Anthropic Economic Index"
+    return [
+        row("ILO", "Telemarketer", "4227", 60.0),
+        row("ILO", "Nursing Assistant", "5321", 20.0),
+        row("ILO", "Office Clerk", "4110", 40.0),
+        row(aei, "Telemarketers", "41-9041", 28.0),
+        row(aei, "Customer Service Representatives", "43-4051", 70.0),
+        row(aei, "Nursing Assistants", "31-1131", 0.0),
+        row(aei, "Tellers", "43-3071", 2.0),
+    ]
+
+
+def test_exposure_is_0_to_100_rank_and_unobserved_aei_is_excluded():
+    """노출도는 출처마다 직업 간 순위 0~100(높을수록 대체 가능성 높음). Anthropic 0점은 '관측 없음'이라 뺀다
+    (e2e 3차 0.0 오표시 8건)."""
     from app.services import automation
 
-    rows = [
-        SimpleNamespace(source="ILO", occupation_title="Telemarketer", occupation_code="4227", score=60.0, source_url="u"),
-        SimpleNamespace(source="Anthropic", occupation_title="Telemarketers", occupation_code="41-9041", score=28.0, source_url="u"),
-    ]
-    automation_rows = automation._load_occupation_rows
-    try:
-        automation._load_occupation_rows = lambda db: rows
-        (score, sources), (none_score, none_sources) = automation.occupation_exposures(None, ["Telemarketers", "Deep Sea Divers"])
-    finally:
-        automation._load_occupation_rows = automation_rows
-    assert score == 44.0 and {s.source for s in sources} == {"ILO", "Anthropic"}
-    assert none_score is None and none_sources == []
+    pct = automation.exposure_percentiles(_exposure_rows())
+    assert pct[("ILO", "4227")] == 100.0 and pct[("ILO", "5321")] == 0.0 and pct[("ILO", "4110")] == 50.0
+    assert ("Anthropic Economic Index", "31-1131") not in pct
+    assert pct[("Anthropic Economic Index", "43-3071")] == 0.0  # 관측된 최저점은 0이 맞다
 
+
+def test_exposure_uses_llm_choice_among_embedding_shortlist(monkeypatch):
+    """임베딩은 후보만 추리고, 같은 직업은 LLM이 고른다. 고른 직업이 '관측 없음'이면 다른 후보로 넘어가지 않는다."""
+    from app.services import automation, embedding
+
+    rows = _exposure_rows()
+    by = {(r.source, r.occupation_title): r for r in rows}
+    aei = "Anthropic Economic Index"
+    shortlist = [
+        {"ILO": [(by[("ILO", "Telemarketer")], 0.7), (by[("ILO", "Office Clerk")], 0.6)],
+         aei: [(by[(aei, "Customer Service Representatives")], 0.7), (by[(aei, "Telemarketers")], 0.69)]},
+        {"ILO": [(by[("ILO", "Office Clerk")], 0.6)], aei: [(by[(aei, "Nursing Assistants")], 0.68)]},
+        {"ILO": [(by[("ILO", "Office Clerk")], 0.5)], aei: [(by[(aei, "Tellers")], 0.5)]},
+    ]
+
+    async def fake_run_db(fn, *args):
+        return shortlist, automation.exposure_percentiles(rows)
+
+    async def fake_match(items):
+        assert items[0][1][aei] == ["Customer Service Representatives", "Telemarketers"]
+        return [{"ILO": 0, aei: 1}, {"ILO": -1, aei: 0}, {"ILO": -1, aei: -1}]
+
+    monkeypatch.setattr(embedding, "run_db", fake_run_db)
+    monkeypatch.setattr(automation.llm, "match_occupations", fake_match)
+    out = asyncio.run(automation.exposures_for_titles(["텔레마케터", "요양보호사", "심해 잠수부"]))
+    # 텔레마케터: ILO 3개 중 1위 = 100, Anthropic 관측 3개 중 2위 = 50 (1순위 후보가 아니라 LLM이 고른 후보)
+    assert out[0][0] == [100.0, 50.0] and [s.source for s in out[0][1]] == ["ILO", aei]
+    assert all(0 <= s.score <= 100 for s in out[0][1])
+    assert out[1] == ([], [])  # LLM이 고른 Nursing Assistants 는 관측 없음(0점) → 0.0으로 표시하지 않는다
+    assert out[2] == ([], [])  # 같은 직업 없음
 
 def test_operator_is_not_offered_simple_labor():
     items = [{"job_title": t} for t in ["기타 제조 관련 단순 종사원", "금속가공 기계 조작원", "생산관리 사무원"]]
@@ -295,14 +335,6 @@ def test_diagnosis_rescales_ten_point_answers_and_derives_effect():
     assert automation.task_effect(85, 20) == "automation"
     assert automation.task_effect(35, 65) == "augmentation"
     assert automation.task_effect(10, 10) == "human"
-
-
-def test_occupation_title_match_needs_core_words():
-    from app.services.automation import MATCH_THRESHOLD, _title_similarity
-
-    assert _title_similarity("Nursing Assistant", "Sewing assistant") < MATCH_THRESHOLD
-    assert _title_similarity("Telemarketers", "Telemarketer") >= MATCH_THRESHOLD
-    assert _title_similarity("Insurance Agent", "Insurance agent") >= MATCH_THRESHOLD
 
 
 def test_hanja_is_stripped_when_retry_still_has_it(monkeypatch):

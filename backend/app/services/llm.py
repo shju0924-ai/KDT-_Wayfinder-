@@ -1,4 +1,6 @@
-"""LLM 오케스트레이션 — 역량 분해·위험도 진단·로드맵 생성 프롬프트 파이프라인.
+"""LLM 오케스트레이션 — 위험도 진단·인접 직무 판정·로드맵 생성 프롬프트 파이프라인.
+
+STEP 2 경력 → NCS 능력단위 연결은 app/services/ncs_link.py (이 모듈의 _parse 를 쓴다).
 
 원칙: 모든 LLM 응답은 근거(evidence/source)를 함께 반환하도록 프롬프트를 설계한다 (환각 억제).
 구조화 출력(structured outputs)으로 스키마를 강제해 근거 필드 누락과 파싱 실패를 함께 막는다.
@@ -26,7 +28,6 @@ from anthropic import AsyncAnthropic
 from pydantic import BaseModel, Field, ValidationError, create_model
 
 from app.core.config import settings
-from app.schemas.career import SkillItem
 from app.services import prompts
 
 logger = logging.getLogger(__name__)
@@ -311,7 +312,13 @@ def _one_of(names: list[str]):
 
 
 # ── STEP 1. 자동화 위험도 진단 ──────────────────────────────
+# 원문 인용 필드 — 근거 의무화. 이름보다 먼저 받아, 모델이 원문 구절을 고른 뒤 그 구절로 업무·역량을 쓰게 한다.
+# 받은 인용이 실제 원문에 있는지 is_quoted 로 확인해 지어낸 항목을 거른다(e2e 3차: 원문에 없는 업무·역량 3건)
+_QUOTE_DESC = "근거가 된 경력 서사 원문 구절. 고치거나 요약하지 말고 원문 글자 그대로 옮길 것"
+
+
 class _TaskOut(BaseModel):
+    source_quote: str = Field(description=_QUOTE_DESC)
     name: str = Field(description="사용자가 실제로 수행한 핵심 업무")
     share_percent: float = Field(
         ge=1,
@@ -342,13 +349,6 @@ class _TaskOut(BaseModel):
 class _TaskAnalysisOut(BaseModel):
     job_title: str = Field(
         description="현재(최근) 직무명. 부연설명 없이 직무명만 간결하게 (예: '콜센터 상담원')"
-    )
-    # 노출도 자료(Anthropic Economic Index)가 O*NET 직업명을 쓴다 — 같은 형식으로 받아야 매칭된다
-    occupation_title_en: str = Field(
-        description=(
-            "국제 직업 데이터와 매칭할 O*NET 표준 영어 직업명 한 개, 복수형 "
-            "(예: 'Customer Service Representatives', 'Bookkeeping, Accounting, and Auditing Clerks')"
-        )
     )
     ncs_search_terms: list[str] = Field(
         min_length=2,
@@ -381,63 +381,50 @@ async def analyze_automation_tasks(
     )
     if out is None:
         raise RuntimeError("업무별 자동화 분석 결과를 파싱하지 못했습니다.")
+    for task in out.tasks:
+        task.name = clean_dangling(task.name)
+    # 업무가 2개 미만으로 줄면 진단이 성립하지 않는다 — 그때는 거르지 않고 로그만 남긴다
+    out.tasks = keep_quoted(out.tasks, career_text, "업무", min_keep=2)
     return out
 
 
-# ── STEP 2. 역량 분해 ──────────────────────────────────────
-SkillCategory = Literal["대인·협상", "커뮤니케이션", "분석·데이터", "기획·전략", "실행·운영", "리더십·관리", "도구·기술"]
+# 4b가 길이 제한에 걸려 '매장 재고 정리 및'처럼 접속어에서 끊긴 이름을 냈다
+_DANGLING = re.compile(r"(\s*(및|과|와|또는|그리고|[,·/]))+\s*$")
+# 인용 비교에서 무시하는 문자 — 공백·문장부호·따옴표
+_QUOTE_NOISE = re.compile(r"[\s.,·:;'\"“”‘’()\[\]「」『』\-–—~…!?/]+")
+# 인용이 원문과 글자 그대로 같지 않아도(조사·어미를 바꿔 옮김) 2글자 묶음 이 비율 이상이 원문에 있으면 인정
+QUOTE_MIN_COVERAGE = 0.8
 
 
-class _SkillOut(BaseModel):
-    name: str = Field(
-        description="역량명 — 설명 없이 짧은 명사구 (예: 갈등 완화, 수요 예측·발주 판단)"
-    )
-    # 자유 문자열이면 소형 모델이 '네거티브 네고세이션' 같은 말을 지어낸다 — 분류는 고정 목록에서 고른다
-    category: SkillCategory = Field(description="역량 분류 — 목록 중 하나")
-    evidence: str = Field(description="이 역량이 있다고 판단한 근거 — 경력 서사에서 가져온 사실 한두 문장")
-
-
-class _SkillsOut(BaseModel):
-    current_job_title: str = Field(
-        description="경력 서사에서 확인되는 현재(최근) 직무명. 부연설명 없이 표준 직무명만 (예: '콜센터 상담원')"
-    )
-    # 최소 3개 — 4b가 경리 8년차 경력에서 2개만 내 인접 직무 판정에 쓸 역량이 모자랐다(e2e 실측)
-    skills: list[_SkillOut] = Field(min_length=3, max_length=6)
-
-
-async def decompose_skills(career_text: str) -> tuple[list[SkillItem], str | None]:
-    """경력 서사 → (전이 가능한 역량 단위 리스트(근거 필수), 현재 직무명).
-
-    현재 직무명은 STEP 3에서 '같은 직무' 후보를 걸러내는 데 쓴다. 이력서·자유 텍스트 경로는
-    사용자가 직무명을 따로 입력하지 않으므로 여기서 함께 뽑는다(추가 호출 없이 필드 하나).
-
-    TODO:
-      - [ ] 긴 이력서 분할 처리
-    """
-    out = await _parse(
-        _SkillsOut,
-        prompts.PROFILE_SYSTEM,
-        f"[경력 서사]\n{career_text}",
-        local_max_tokens=1200,
-    )
-    if out is None:
-        raise RuntimeError("역량 분해 결과를 파싱하지 못했습니다.")
-    skills = [
-        SkillItem(name=clean_skill_name(s.name), category=s.category, evidence=s.evidence, confirmed=False)
-        for s in out.skills
-    ]
-    return skills, (out.current_job_title.strip() or None)
-
-
-# 근거보다 부풀린 꾸밈말 — 프롬프트로 금지해도 4b가 '복합 시스템 운영 관리', '협업 기반 공급망 조정'을 냈다.
-# 꾸밈말만 떼고 핵심 명사구는 남긴다. 다 떼면 빈 이름이 되는 경우는 원래 이름을 쓴다
-_INFLATED_PREFIX = re.compile(r"^(복합|전략적|종합적|고도화된|협업\s*기반)\s+")
-
-
-def clean_skill_name(name: str) -> str:
-    """'복합 시스템 운영 관리' → '시스템 운영 관리', '협업 기반 공급망 조정' → '공급망 조정'."""
-    cleaned = _INFLATED_PREFIX.sub("", name.strip()).strip()
+def clean_dangling(name: str) -> str:
+    """'매장 재고 정리 및' → '매장 재고 정리'. 다 떼면 빈 이름이 되는 경우는 원래 이름을 쓴다."""
+    cleaned = _DANGLING.sub("", name.strip()).strip()
     return cleaned or name.strip()
+
+
+def is_quoted(quote: str, source: str) -> bool:
+    """quote 가 원문 source 에서 옮긴 구절인지 — 공백·문장부호를 무시하고 비교한다."""
+    q, s = _QUOTE_NOISE.sub("", quote), _QUOTE_NOISE.sub("", source)
+    if len(q) < 3:
+        return False
+    if q in s:
+        return True
+    grams = {q[i : i + 2] for i in range(len(q) - 1)}
+    return sum(g in s for g in grams) / len(grams) >= QUOTE_MIN_COVERAGE
+
+
+def keep_quoted(items: list, source: str, label: str, min_keep: int) -> list:
+    """원문 인용(source_quote)이 원문에 있는 항목만 남긴다. 남는 수가 min_keep 미만이면 거르지 않는다."""
+    kept = [it for it in items if is_quoted(it.source_quote, source)]
+    dropped = [it for it in items if it not in kept]
+    if not dropped:
+        return items
+    names = ", ".join(f"{it.name!r}(인용 {it.source_quote!r})" for it in dropped)
+    if len(kept) < min_keep:
+        logger.warning("원문 인용 확인 실패 %s %d건 — 남는 수가 %d개 미만이라 유지: %s", label, len(dropped), min_keep, names)
+        return items
+    logger.warning("원문에 없는 %s 제외: %s", label, names)
+    return kept
 
 
 # ── STEP 3. 직무 매칭 해석 ─────────────────────────────────
@@ -448,12 +435,11 @@ def clean_skill_name(name: str) -> str:
 JUDGE_SNIPPET_CHARS = 1200
 
 
-# 후보 직무별 공개 AI 노출도(ILO·Anthropic, 영문 직업명 기준)를 찾는 데 쓴다 — 현재 직무 진단과 같은 방식.
-# 출력 언어 규칙(한국어만)의 예외: 이 필드는 매칭용 키라 영어로 받는다.
-_OCCUPATION_EN_DESC = (
-    "이 직무에 해당하는 O*NET 표준 영어 직업명 한 개, 복수형 (예: 'Telemarketers', "
-    "'Customer Service Representatives', 'Market Research Analysts and Marketing Specialists'). "
-    "이 필드만 예외적으로 영어로 적는다"
+# 면허 직업 라벨 — 직무명 목록을 손으로 적으면 목록에 없는 직업을 놓친다. 판정 호출에서 함께 묻는다.
+# 걸러내지 않고 카드에 라벨만 붙이므로 오판의 피해가 작다(판단은 사용자 몫)
+_LICENSE_DESC = (
+    "이 직무가 법으로 정한 국가 면허·자격을 취득해야만 일할 수 있는 직업이면 true. "
+    "공고에 자격증이 '우대'로만 적혀 있거나 없어도 일할 수 있으면 false"
 )
 
 
@@ -479,7 +465,7 @@ def _judge_batch_schema(skills: list[str], count: int) -> type[BaseModel]:
         ),
         demand_outlook=(Literal["증가", "유지", "감소"], ...),
         transition_difficulty=(Literal["낮음", "보통", "높음"], ...),
-        occupation_title_en=(str, Field(description=_OCCUPATION_EN_DESC)),
+        license_required=(bool, Field(description=_LICENSE_DESC)),
     )
     return create_model(
         "_JobJudgesOut",
@@ -492,7 +478,7 @@ def _judge_batch_schema(skills: list[str], count: int) -> type[BaseModel]:
 
 def _default_judgement() -> dict:
     return {
-        "occupation_title_en": "",
+        "license_required": False,
         "same_as_current": False,
         "demand_outlook": "유지",
         "transition_difficulty": "보통",
@@ -503,15 +489,20 @@ def _default_judgement() -> dict:
 
 
 async def judge_job_matches(
-    skills: list[str], current_job: str | None, postings: list[dict]
+    skills: list[str], current_job: str | None, postings: list[dict], held_skills: list[str] | None = None
 ) -> list[dict]:
     """검색된 채용공고 여러 건(job_title·snippet)을 한 번에 판정 — 공고 순서대로 결과를 돌려준다.
+
+    skills 는 matched_skills 선택지다. 인접 트랙은 역량별 검색에서 그 직무에 실제로 걸린 역량만 넘긴다 —
+    모든 보유 역량을 선택지로 주면 4b가 같은 역량 2개를 모든 직무의 근거로 반복했다(e2e 3차).
+    held_skills 는 전체 보유 역량으로, 부족 역량에 보유 역량이 섞이지 않게 거르는 데 쓴다(없으면 skills).
 
     결과는 모델이 밝힌 job_no 로 공고와 짝짓는다. 같은 번호가 두 번 오면 앞의 것을 쓰고, 빠진 번호와
     파싱 실패는 기본값(기여 역량 없음)이라 호출부의 인접 판정에서 자연히 탈락한다.
     """
     if not postings or not skills:
         return [_default_judgement() for _ in postings]
+    held = set(held_skills or skills)
     listing = "\n\n".join(
         f"[{i}] 직무명: {p['job_title']}\n공고 발췌:\n{(p.get('snippet') or '')[:JUDGE_SNIPPET_CHARS]}"
         for i, p in enumerate(postings)
@@ -541,14 +532,14 @@ async def judge_job_matches(
             [s for s in judged.matched_skills if s in skills] + [s for s in judged.missing_skills if s in skills]
         ))[:4]
         missing = list(dict.fromkeys(
-            s for s in judged.missing_skills if s not in skills and not is_requirement_condition(s)
+            s for s in judged.missing_skills if s not in held and not is_requirement_condition(s)
         ))[:4]
         results[judged.job_no] = (
             {
                 "same_as_current": judged.same_as_current,
                 "demand_outlook": judged.demand_outlook,
                 "transition_difficulty": judged.transition_difficulty,
-                "occupation_title_en": judged.occupation_title_en.strip(),
+                "license_required": judged.license_required,
                 "matched_skills": matched,
                 # 요구역량 = 이어지는 보유 역량 + 공고에만 있는 부족 역량
                 "required_skills": (matched + missing)[:5],
@@ -560,26 +551,22 @@ async def judge_job_matches(
     return results
 
 
-# ── STEP 3-B. 교육 후 전환형 — 직무 제안(검색 방향 역전) ─────
-# 인접 트랙은 '역량 벡터 → 유사 공고'로 찾지만, 교육 후 전환형을 같은 방식으로 하면
-# 사용자 역량과 임베딩 거리가 가까운 공고(=사무·상담 계열)만 계속 나온다.
-# 개발자·데이터 분석가처럼 표면 직무는 멀어도 밑바탕 역량이 전이되는 직무는 벡터가 못 올린다.
-# 그래서 이 트랙만 순서를 뒤집는다: LLM이 먼저 전이 가능한 새 직무를 제안하고,
-# 그다음 그 직무에 실제 훈련과정·채용이 있는지 데이터로 확인한다(jobs.py).
-def _training_targets_schema(held_names: list[str]) -> type[BaseModel]:
-    """직무 제안 스키마 — transferable_skills 를 보유 역량 enum 으로 강제한다.
+# ── STEP 3-B. 교육 후 전환형 — NCS 직무 후보 중 선택 ─────
+# 인접 트랙은 '역량 벡터 → 유사 공고'로 찾지만, 같은 방식이면 사무·상담 계열 공고만 계속 나온다.
+# 이전에는 LLM이 새 직무명을 자유롭게 제안했는데, 4b는 범용 직무(데이터 분석가·프로젝트 관리자)를 반복했다.
+# 지금은 훈련과정이 있는 NCS 세분류를 역량별로 찾고 현재 분야(중분류)는 빼서 후보로 주고(ncs_jobs.py),
+# LLM은 그중 밑바탕 역량이 이어지는 직무를 번호로 고른다.
+def _training_targets_schema(held_names: list[str], count: int) -> type[BaseModel]:
+    """직무 선택 스키마 — 직무는 NCS 후보 번호(job_no)로, transferable_skills 는 보유 역량 enum 으로 강제한다.
 
+    직무명을 자유 문자열로 받으면 4b가 경력과 무관한 범용 직무(데이터 분석가·프로젝트 관리자)를 반복했다.
+    후보는 호출부(jobs.py)가 NCS 세분류 색인에서 찾아 넘긴다 — 모델은 그 안에서 고르기만 한다.
     로컬 모델은 목록 대신 프롬프트 예시 문구('데이터를 다루는 감각' 등)를 역량명으로 쓰는 경향이
     있어, 사후 필터만으로는 제안이 전부 탈락했다. 스키마에서 선택지 자체를 보유 역량으로 묶는다.
     """
     target = create_model(
         "_TrainingTargetOut",
-        job_title=(
-            str,
-            Field(
-                description="전이 가능한 새 직무명. 한국어 표준 직무명만 — 영어 병기·괄호 설명 없이 (예: '데이터 분석가')"
-            ),
-        ),
+        job_no=(Literal[tuple(range(count))], Field(description="고른 NCS 직무 후보의 번호 ([번호])")),
         rationale=(
             str,
             Field(description="이 사람의 어떤 밑바탕 역량이 이 직무로 이어지는지, 보유 역량 근거를 들어 2~3문장"),
@@ -604,76 +591,127 @@ def _training_targets_schema(held_names: list[str]) -> type[BaseModel]:
             Literal["낮음", "보통", "높음"],
             Field(description="교육을 거친 전환의 현실적 난이도"),
         ),
-        occupation_title_en=(str, Field(description=_OCCUPATION_EN_DESC)),
+        license_required=(bool, Field(description=_LICENSE_DESC)),
     )
     return create_model(
         "_TrainingTargetsOut",
         targets=(
             list[target],
-            Field(min_length=1, max_length=5, description="전이 가능한 새 직무 제안 4~5개"),
+            Field(min_length=1, max_length=5, description="후보 중 전이 가능한 직무 4~5개 — 서로 다른 번호"),
         ),
     )
 
 
-# 어느 경력에나 붙는 범용 전환 직무 — 괄호·공백을 뗀 직무명이 이것과 같을 때만 범용으로 본다.
-# '금융 데이터 분석가', '물류 데이터 분석가'처럼 도메인을 붙인 제안은 범용이 아니다
-_GENERIC_TARGETS = {"데이터분석가", "데이터사이언티스트", "프로젝트관리자", "프로젝트매니저", "비즈니스분석가", "pm"}
-
-
-def is_generic_target(title: str) -> bool:
-    core = re.split(r"[(（\[]", clean_job_title(title))[0].replace(" ", "").casefold()
-    return core in _GENERIC_TARGETS
+def _candidate_lines(candidates: list[dict]) -> str:
+    return "\n".join(
+        f"[{i}] {c['job_title']} (NCS {c['path']}) — 주요 능력단위: {c['units'] or '정보 없음'}"
+        for i, c in enumerate(candidates)
+    )
 
 
 async def suggest_training_targets(
-    profile_lines: list[str], current_job: str | None, held_names: list[str]
+    candidates: list[dict], profile_lines: list[str], current_job: str | None, held_names: list[str]
 ) -> list[dict]:
-    """보유 역량(근거 포함) → 밑바탕이 전이되는 '새 직무군' 후보 제안 (교육 후 전환형).
+    """NCS 세분류 후보 + 보유 역량(근거 포함) → 밑바탕이 전이되는 '새 직무군' 선택 (교육 후 전환형).
 
-    반환값은 직무 제안일 뿐 확정이 아니다 — 호출부(jobs.py)가 각 제안에 실제 훈련과정과
-    채용이 있는지 데이터로 확인해 근거 없는 제안을 걸러낸다.
+    반환값은 직무 제안일 뿐 확정이 아니다 — 호출부(jobs.py)가 실채용 공고를 붙이고 적합도를 계산한다.
     """
-    if not profile_lines:
+    if not profile_lines or not candidates:
         return []
     # 역량명은 호출부가 프로필에서 그대로 넘긴다. 줄 텍스트에서 ' (' 앞을 잘라 쓰면
     # '고객 서비스 (CS) 대응'처럼 괄호가 든 역량명이 잘려 enum 이 실제 보유 역량과 어긋났다.
     held_names = list(dict.fromkeys(n.strip() for n in held_names if n.strip()))
     out = await _parse(
-        _training_targets_schema(held_names),
+        _training_targets_schema(held_names, len(candidates)),
         prompts.TRAINING_TARGET_SYSTEM,
         f"[현재 직무]\n{current_job or '확인되지 않음'}\n\n"
-        f"[보유 역량 (역량 — 근거)]\n" + "\n".join(profile_lines),
+        f"[보유 역량 (역량 — 근거)]\n" + "\n".join(profile_lines)
+        + f"\n\n[NCS 직무 후보]\n{_candidate_lines(candidates)}",
         local_max_tokens=1800,
     )
     if out is None:
         return []
 
     results: list[dict] = []
-    generic_kept = False
+    seen: set[int] = set()
     for t in out.targets:
+        if t.job_no in seen:
+            continue
+        seen.add(t.job_no)
         # 지어낸 역량명이 섞이지 않도록 보유 역량 목록으로 거르고, 이어지는 역량이 없으면 버린다
         transferable = list(dict.fromkeys(s for s in t.transferable_skills if s in held_names))
         if not transferable:
             continue
-        # 범용 직무는 하나만 — 프롬프트로 제한해도 4b가 15명 중 12명에게 데이터 분석가·PM 을 함께 냈다(e2e 실측)
-        if is_generic_target(t.job_title):
-            if generic_kept:
-                continue
-            generic_kept = True
         needs = list(dict.fromkeys(
             n for n in (clean_skill_phrase(x) for x in t.training_needs) if n and not is_requirement_condition(n)
         ))
+        cand = candidates[t.job_no]
         results.append(
             {
-                "job_title": clean_job_title(t.job_title),
+                "job_title": cand["job_title"],
+                "ncs_code": cand["ncs_code"],
+                "ncs_path": cand["path"],
                 "rationale": t.rationale,
                 "transferable_skills": transferable,
                 "training_needs": needs[:4],
                 "demand_outlook": t.demand_outlook,
                 "transition_difficulty": t.transition_difficulty,
-                "occupation_title_en": t.occupation_title_en.strip(),
+                "license_required": t.license_required,
             }
         )
+    return results
+
+
+# ── AI 노출도 직업 매칭 — 임베딩 후보 중 선택 ──────────────────
+# 예전에는 판정마다 LLM이 영문 직업명을 지어 내고 단어 규칙으로 맞췄다 — 물류 직무는 8장 모두 매칭에 실패했다.
+# 한국어 직무명 ↔ 노출도 직업명(영문)을 임베딩으로 바로 비교하면 1순위가 자주 틀린다(실측: 간호조무사 → Nurse 0.73,
+# 은행 창구 텔러 → Bank Treasurer 0.71). 그래서 임베딩은 출처별 후보 몇 개를 추리는 데만 쓰고, 고르는 일은 LLM이 한다.
+OCCUPATION_SOURCES = ("ILO/NASK GenAI Exposure 2025", "Anthropic Economic Index")
+
+
+def _occupation_match_schema(count: int, options: int) -> type[BaseModel]:
+    choice = Literal[tuple(range(-1, options))]
+    item = create_model(
+        "_OccupationMatchOut",
+        item_no=(Literal[tuple(range(count))], Field(description="판단하는 직무의 [번호]")),
+        ilo_no=(choice, Field(description="ILO 후보 중 같은 직업의 번호. 같은 직업이 없으면 -1")),
+        aei_no=(choice, Field(description="Anthropic 후보 중 같은 직업의 번호. 같은 직업이 없으면 -1")),
+    )
+    return create_model(
+        "_OccupationMatchesOut",
+        matches=(list[item], Field(min_length=count, max_length=count, description="직무마다 하나")),
+    )
+
+
+async def match_occupations(items: list[tuple[str, dict[str, list[str]]]]) -> list[dict[str, int]]:
+    """(한국어 직무명, {출처: 후보 직업명 목록}) 마다 출처별로 같은 직업의 후보 번호(없으면 -1)를 고른다.
+
+    한 단계의 카드 전부를 한 번에 묻는다(호출 1회). 파싱 실패·누락은 -1(매칭 없음)."""
+    results = [{src: -1 for src in OCCUPATION_SOURCES} for _ in items]
+    options = max((len(o) for _, opts in items for o in opts.values()), default=0)
+    if not items or options == 0:
+        return results
+    ilo, aei = OCCUPATION_SOURCES
+    listing = "\n\n".join(
+        f"[{i}] {title}\n"
+        + "  ILO 후보: " + " / ".join(f"({j}) {n}" for j, n in enumerate(opts.get(ilo, []))) + "\n"
+        + "  Anthropic 후보: " + " / ".join(f"({j}) {n}" for j, n in enumerate(opts.get(aei, [])))
+        for i, (title, opts) in enumerate(items)
+    )
+    out = await _parse(
+        _occupation_match_schema(len(items), options),
+        prompts.OCCUPATION_MATCH_SYSTEM,
+        f"[직무 {len(items)}개]\n{listing}",
+        local_max_tokens=60 * len(items) + 200,
+    )
+    if out is None:
+        return results
+    for m in out.matches:
+        opts = items[m.item_no][1]
+        if 0 <= m.ilo_no < len(opts.get(ilo, [])):
+            results[m.item_no][ilo] = m.ilo_no
+        if 0 <= m.aei_no < len(opts.get(aei, [])):
+            results[m.item_no][aei] = m.aei_no
     return results
 
 

@@ -35,3 +35,6 @@ Thumbs.db
 data-pipeline/data/
 *.parquet
 *.csv
+
+# E2E 회귀 결과(scripts/e2e_eval.py 기본 저장 위치)
+backend/e2e_results/

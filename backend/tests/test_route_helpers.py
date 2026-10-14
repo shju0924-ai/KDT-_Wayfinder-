@@ -1,5 +1,5 @@
 from app.api.errors import upstream_error
-from app.api.routes.jobs import USER_ADDED_CATEGORY, _dedupe_targets, _skill_search_text
+from app.api.routes.jobs import _dedupe_targets, _skill_search_text
 from app.schemas.career import SkillItem, SkillProfile
 
 
@@ -15,17 +15,21 @@ def test_dedupe_targets_keeps_first_of_same_core_title() -> None:
     assert [t["rationale"] for t in result] == ["first", "other"]
 
 
-def test_skill_search_text_skips_evidence_for_user_added_skill() -> None:
+def test_skill_search_text_uses_definition_for_user_added_unit() -> None:
+    def unit(name, job, definition, evidence=None, user_added=False):
+        return SkillItem(ncs_code=name, name=name, ncs_job=job, ncs_path=f"경영 > {job}", definition=definition,
+                         evidence=evidence, user_added=user_added)
+
     profile = SkillProfile(
         skills=[
-            SkillItem(name="고객 갈등 완화", category="대인·협상", evidence="강성 민원 진정"),
-            SkillItem(name="SQL", category=USER_ADDED_CATEGORY, evidence="사용자가 직접 추가한 역량"),
+            unit("고객 상담", "보험모집", "고객 요구를 파악해 상담하는", evidence="강성 민원 고객을 진정시켜"),
+            unit("채권관리", "회계·감사", "미수금을 회수·관리하는", user_added=True),
         ]
     )
 
     lines = _skill_search_text(profile).split("\n")
 
-    assert lines == ["고객 갈등 완화 (대인·협상) — 강성 민원 진정", "SQL"]
+    assert lines == ["고객 상담 (보험모집) — 강성 민원 고객을 진정시켜", "채권관리 (회계·감사) — 미수금을 회수·관리하는"]
 
 
 def test_upstream_error_hides_exception_message() -> None:

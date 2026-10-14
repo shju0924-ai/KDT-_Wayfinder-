@@ -47,11 +47,12 @@ def main() -> None:
     print("=" * 60)
     print("[2/2] 청킹·임베딩·적재 단계")
     print("=" * 60)
-    from embedding import embed_courses, embed_jobs, load_reference_data
+    from embedding import embed_courses, embed_jobs, embed_ncs, load_reference_data
 
     embed_jobs.run(limit=args.limit, dry_run=args.dry_run)
     embed_courses.run(limit=args.limit, dry_run=args.dry_run)
     load_reference_data.run(dry_run=args.dry_run)
+    embed_ncs.run(dry_run=args.dry_run)  # NCS 적재 후 — 이름·정의가 바뀐 단위만 다시 임베딩
 
     print("파이프라인 완료")
 

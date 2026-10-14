@@ -5,6 +5,8 @@
 export interface CareerInput {
   raw_text: string;
   current_job_title?: string | null;
+  /** STEP 1 진단 업무 — 업무에 붙은 NCS 코드를 STEP 2 능력단위 후보에 더한다(없으면 건너뜀) */
+  diagnosed_tasks?: AutomationTask[];
 }
 
 export interface ParsedResume {
@@ -42,6 +44,8 @@ export interface AutomationTask {
   rationale: string;
   ncs_code?: string | null;
   ncs_unit?: string | null;
+  /** 이 업무의 근거가 된 경력 서사 원문 구절 */
+  source_quote?: string | null;
 }
 
 /** 진단에 사용한 데이터 또는 방법론 출처 */
@@ -49,6 +53,7 @@ export interface RiskSource {
   source: string;
   label: string;
   url: string;
+  /** AI 노출도 출처면 직업 간 순위로 환산한 0~100점(100에 가까울수록 AI로 대체될 가능성이 높음) */
   score?: number | null;
   note?: string | null;
 }
@@ -71,16 +76,28 @@ export interface RiskDiagnosis {
 }
 
 // ── STEP 2. 역량 프로필 ────────────────────────────────
+/** 경력에서 확인한 역량 — NCS 능력단위(국가직무능력표준의 직무별 능력)로 표현한다 */
 export interface SkillItem {
+  /** NCS 능력단위 코드 (예: 0203020101_17v2) */
+  ncs_code: string;
+  /** 능력단위명 (예: 전표관리) */
   name: string;
-  category: string;
-  evidence: string;
+  /** 능력단위가 속한 NCS 직무(세분류) (예: 회계·감사) */
+  ncs_job: string;
+  /** NCS 분류 경로 (대분류 > 중분류 > 소분류 > 세분류) */
+  ncs_path: string;
+  /** 능력단위 정의(축약) */
+  definition: string;
+  /** 이 능력단위의 근거가 된 경력 서사 원문 구절 — 사용자가 직접 추가하면 null */
+  evidence?: string | null;
+  /** 사용자가 NCS 검색으로 직접 추가한 능력단위인지 */
+  user_added: boolean;
   confirmed: boolean;
 }
 
 export interface SkillProfile {
   skills: SkillItem[];
-  /** 현재(최근) 직무명 — 사용자 입력값 또는 경력 서사에서 추출. STEP 3 같은 직무 제외에 사용 */
+  /** 현재(최근) 직무명 — 사용자 입력값(설문). 없으면 STEP 1 진단의 job_title 을 쓴다. STEP 3 같은 직무 제외에 사용 */
   current_job_title?: string | null;
 }
 
@@ -108,7 +125,10 @@ export interface JobMatch {
   missing_skills: string[];
   /** 추천 근거가 약한 이유 — 비어 있으면 근거 충분 */
   weak_reasons: string[];
-  /** 이 직무의 공개 AI 노출도 참고 점수(출처 평균). 판정 없음. 매칭 자료가 없으면 null */
+  /** 국가 면허가 있어야 일할 수 있는 직업인지 — 걸러내지 않고 라벨만 붙인다 */
+  license_required: boolean;
+  /** 이 직무의 AI 노출도 0~100 — 100에 가까울수록 AI로 대체될 가능성이 높은 직무.
+   *  공개 자료(ILO·Anthropic)의 직업 간 순위를 출처별로 평균. 매칭 자료가 없으면 null */
   ai_exposure_score?: number | null;
   /** 노출도 출처별 점수와 매칭된 직업명 */
   ai_exposure_sources: RiskSource[];

@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>페르소나 정답 라벨링</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #fff; --text: #1d2330; --muted: #667085; --line: #e3e6ec;
+  --accent: #2f6fdf; --accent-soft: #e8effc;
+  --ok: #1f8a4c; --ok-soft: #e3f4ea; --bad: #c43d3d; --bad-soft: #fbe7e7; --mid: #a86b00; --mid-soft: #fbf0d9;
+  --hl: #fff3c4;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171c; --panel: #1c2027; --text: #e6e8ec; --muted: #98a1b0; --line: #2d333d;
+    --accent: #6d9cf0; --accent-soft: #233150;
+    --ok: #5cc98a; --ok-soft: #1b3426; --bad: #ef7d7d; --bad-soft: #3a2121; --mid: #e3b45a; --mid-soft: #382c14;
+    --hl: #4a4120;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.55 "Pretendard", "Malgun Gothic", system-ui, sans-serif; }
+header { display: flex; align-items: center; gap: 16px; padding: 10px 20px; background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5; }
+header h1 { font-size: 16px; margin: 0; }
+.progress { color: var(--muted); }
+.bar { flex: 0 0 160px; height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--ok); }
+.layout { display: grid; grid-template-columns: 220px minmax(0, 1fr) 360px; gap: 16px; padding: 16px 20px; align-items: start; }
+@media (max-width: 1200px) { .layout { grid-template-columns: 200px minmax(0, 1fr); } .career { grid-column: 2; } }
+@media (max-width: 760px) { .layout { grid-template-columns: 1fr; padding: 12px 16px; } .career { grid-column: 1; } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
+.list { position: sticky; top: 64px; max-height: calc(100vh - 80px); overflow: auto; padding: 8px; }
+.item { padding: 7px 9px; border-radius: 6px; cursor: pointer; display: flex; justify-content: space-between; gap: 6px; }
+.item:hover { background: var(--bg); }
+.item.active { background: var(--accent-soft); }
+.item small { color: var(--muted); white-space: nowrap; }
+.item.done small { color: var(--ok); }
+h2 { font-size: 20px; margin: 0 0 2px; }
+h3 { font-size: 15px; margin: 0 0 4px; }
+.sub { color: var(--muted); font-size: 13px; }
+.q { color: var(--muted); font-size: 13px; margin: 0 0 10px; }
+.row { border-top: 1px solid var(--line); padding: 10px 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; align-items: start; }
+.row:first-of-type { border-top: 0; }
+.name { font-weight: 600; cursor: pointer; }
+.name:hover { text-decoration: underline; }
+.meta { font-size: 12px; color: var(--muted); }
+.quote { font-size: 12.5px; color: var(--muted); border-left: 3px solid var(--line); padding-left: 8px; margin-top: 4px; }
+.badge { font-size: 11px; padding: 0 6px; border-radius: 4px; margin-left: 6px; font-weight: 500; }
+.b-need { background: var(--bad-soft); color: var(--bad); }
+.b-user { background: var(--accent-soft); color: var(--accent); }
+.b-mid { background: var(--mid-soft); color: var(--mid); }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.seg button { border: 0; background: transparent; color: var(--text); padding: 5px 11px; cursor: pointer; font: inherit; font-size: 13px; border-left: 1px solid var(--line); }
+.seg button:first-child { border-left: 0; }
+.seg button:hover { background: var(--bg); }
+.seg button.on.ok { background: var(--ok); color: #fff; }
+.seg button.on.bad { background: var(--bad); color: #fff; }
+.seg button.on.mid { background: var(--mid); color: #fff; }
+.add { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+.add input, textarea { flex: 1; min-width: 160px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
+.btn { border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 6px 12px; border-radius: 6px; cursor: pointer; font: inherit; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.small { padding: 1px 8px; font-size: 12px; }
+details summary { cursor: pointer; color: var(--muted); font-size: 12px; margin-top: 4px; }
+.pairs { font-size: 12px; color: var(--muted); margin: 4px 0 0; padding-left: 16px; }
+.career { position: sticky; top: 64px; max-height: calc(100vh - 80px); overflow: auto; white-space: pre-wrap; }
+.career mark { background: var(--hl); color: inherit; border-radius: 3px; }
+.footer { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.status { font-size: 12px; color: var(--muted); }
+.empty { color: var(--muted); font-size: 13px; padding: 8px 0; }
+.results { max-height: 260px; overflow: auto; margin-top: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>페르소나 정답 라벨링</h1>
+  <div class="bar"><i id="bar" style="width:0"></i></div>
+  <span class="progress" id="progress"></span>
+  <span class="status" id="status" style="margin-left:auto"></span>
+</header>
+<div class="layout">
+  <nav class="card list" id="personaList"></nav>
+  <main id="main"><div class="card empty">왼쪽에서 페르소나를 고르세요.</div></main>
+  <aside class="card career" id="career"></aside>
+</div>
+<script>
+const LINK_MARKS = [["O", "맞음", "ok"], ["D", "업종 다름", "mid"], ["X", "틀림", "bad"]];
+const GRADES = [["easy", "전환 쉬움", "ok"], ["possible", "추가 학습하면 가능", "mid"], ["no", "어려움", "bad"]];
+let personas = [], allJobs = [], cur = null, quote = null, minPostings = 5;
+
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+async function api(path, body) {
+  const res = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {});
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || res.status);
+  return data;
+}
+
+async function save(body) {
+  $("#status").textContent = "저장 중…";
+  try {
+    cur.labels = await api("/api/label", { key: cur.key, ...body });
+    $("#status").textContent = "저장됨 " + new Date().toLocaleTimeString();
+  } catch (e) {
+    $("#status").textContent = "저장 실패: " + e.message;
+  }
+}
+
+async function loadList() {
+  personas = await api("/api/personas");
+  renderList();
+}
+
+function renderList() {
+  const done = personas.filter((p) => p.done).length;
+  $("#progress").textContent = `완료 ${done} / ${personas.length}명`;
+  $("#bar").style.width = (personas.length ? (done / personas.length) * 100 : 0) + "%";
+  $("#personaList").innerHTML = personas.map((p) => `<div class="item ${p.done ? "done" : ""} ${cur && cur.key === p.key ? "active" : ""}" data-key="${p.key}">
+      <span>${esc(p.title)}</span><small>${p.done ? "완료" : p.n_links > p.n_marked ? `남은 판정 ${p.n_links - p.n_marked}` : "연결 판정 끝"}</small></div>`).join("");
+}
+
+async function openPersona(key) {
+  cur = await api("/api/persona?key=" + key);
+  quote = null;
+  renderList(); renderMain(); renderCareer(); loadRecs();
+  window.scrollTo(0, 0);
+}
+
+async function refresh() {
+  const keep = $("#note") ? $("#note").value : null;
+  const fresh = await api("/api/persona?key=" + cur.key);
+  Object.assign(cur, fresh);
+  renderMain();
+  if (keep != null) $("#note").value = keep;
+  const p = personas.find((x) => x.key === cur.key);
+  if (p) { p.n_marked = cur.links.filter((l) => (cur.labels.links || {})[l.code]).length; renderList(); }
+  loadRecs();
+}
+
+function seg(options, value, attrs) {
+  return `<span class="seg">${options.map(([v, label, cls]) =>
+    `<button class="${value === v ? "on " + cls : ""}" data-value="${v}" ${attrs}>${label}</button>`).join("")}</span>`;
+}
+
+function unitMeta(u) { return `${esc(u.path)} · NCS ${esc(u.code)}<br>${esc(u.def)}`; }
+
+function renderMain() {
+  const lab = cur.labels || {}, marks = lab.links || {}, by = lab.marked_by || {}, notes = lab.claude_notes || {};
+  const links = cur.links.map((u) => `<div class="row">
+      <div>
+        <span class="name" data-quote="${esc(u.quote)}">${esc(u.name)}</span> <span class="sub">(${esc(u.job_title)})</span>
+        ${by[u.code] ? '<span class="badge b-user">Claude 판정</span>' : ""}
+        ${!marks[u.code] ? '<span class="badge b-need">판정 필요</span>' : ""}
+        ${notes[u.code] ? `<div class="quote" style="border-color:var(--mid)">Claude 의견: ${esc(notes[u.code])}</div>` : ""}
+        <div class="meta">${unitMeta(u)}</div>
+        <div class="quote">“${esc(u.quote)}”</div>
+      </div>
+      <div>${seg(LINK_MARKS, marks[u.code], `data-op="link" data-code="${u.code}"`)}</div>
+    </div>`).join("");
+  const added = cur.added.map((u) => `<div class="row"><div><span class="name" style="cursor:default">${esc(u.name)}</span>
+      <span class="sub">(${esc(u.job_title)})</span><span class="badge b-user">직접 추가</span><div class="meta">${unitMeta(u)}</div></div>
+      <div><button class="btn small" data-remove="${u.code}">삭제</button></div></div>`).join("");
+  const addedSet = new Set((lab.added_units || []));
+  const unpicked = cur.unpicked.filter((u) => !addedSet.has(u.code)).map((u) => `<div class="row"><div>
+      <span class="name" style="cursor:default">${esc(u.name)}</span> <span class="sub">(${esc(u.job_title)})</span>
+      <div class="meta">${unitMeta(u)}</div></div><div><button class="btn small" data-addunit="${u.code}">추가</button></div></div>`).join("");
+  const marked = cur.links.filter((u) => marks[u.code]).length;
+  $("#main").innerHTML = `
+    <div class="card">
+      <h2>${esc(cur.title)}</h2>
+      <div class="sub">페르소나 ${esc(cur.key)}${cur.context ? " · " + esc(cur.context) : " · 이력서형"} · 오른쪽에 근거로 쓴 경력 원문이 있습니다</div>
+    </div>
+    <div class="card">
+      <h3>1. 능력단위 연결 판정 <span class="sub">(${marked}/${cur.links.length})</span></h3>
+      <p class="q">경력에 이 능력단위의 일을 <b>실제로 해 본</b> 근거가 있나요? 이름을 누르면 오른쪽 원문에서 근거 구절이 표시됩니다.<br>
+        <b>업종 다름</b>: 일은 맞지만 다른 업종 직무의 능력단위(예: 호텔 응대 → 여행상품상담의 고객응대). 추천에서 빠지는 것은 <b>틀림</b>뿐입니다.</p>
+      ${links || '<div class="empty">연결된 능력단위가 없습니다.</div>'}
+      ${added}
+      <details ${unpicked ? "" : "hidden"}><summary>후보였지만 고르지 않은 능력단위 ${cur.unpicked.length}개 — 빠진 것이 있으면 추가</summary>${unpicked}</details>
+      <div class="add"><input id="searchUnit" placeholder="능력단위 검색 (이름이나 직무명, 예: 채권관리)">
+        <button class="btn" id="doSearch">검색</button></div>
+      <div class="results" id="searchResults"></div>
+    </div>
+    <div class="card">
+      <h3>2. 추천 직무 판정</h3>
+      <p class="q">이 사람이 옮겨 갈 수 있나요? 추천은 <b>틀림</b>을 뺀 연결과 추가한 능력단위로 다시 계산됩니다.
+        지금 쓰는 능력단위: ${cur.effective.length ? cur.effective.map(esc).join(", ") : "없음"}<br>
+        <label><input type="checkbox" id="postFilter" ${minPostings ? "checked" : ""}> 채용 공고 5건 이상 직무만</label></p>
+      <div id="recs"><div class="empty">계산 중…</div></div>
+      <div class="add">
+        <input id="extraJob" list="allJobs" placeholder="추천에 없지만 옮겨 갈 수 있는 직무 검색">
+        <datalist id="allJobs">${allJobs.map((j) => `<option value="${esc(j.title)}">${esc(j.path)} · 공고 ${j.postings}건</option>`).join("")}</datalist>
+        <button class="btn" id="addJob">직무 추가</button>
+      </div>
+    </div>
+    <div class="card">
+      <h3>3. 마무리</h3>
+      <textarea id="note" rows="2" placeholder="메모 (판단이 어려웠던 이유 등)">${esc(lab.note || "")}</textarea>
+      <div class="footer" style="margin-top:10px">
+        <label><input type="checkbox" id="done" ${lab.done ? "checked" : ""}> 이 페르소나 판정 완료</label>
+        <button class="btn primary" id="next">완료하고 다음 →</button>
+      </div>
+    </div>`;
+}
+
+function renderCareer() {
+  let html = esc(cur.career);
+  if (quote) {
+    const q = esc(quote);
+    html = html.includes(q) ? html.replace(q, `<mark>${q}</mark>`) : html;
+  }
+  $("#career").innerHTML = `<h3>경력 원문</h3><p class="q">${quote ? "노란색이 근거 구절입니다." : "능력단위 이름을 누르면 근거 구절이 표시됩니다."}</p>${html}`;
+}
+
+async function loadRecs() {
+  const key = cur.key;
+  const list = await api(`/api/recs?key=${key}&min_postings=${minPostings}`);
+  if (!cur || cur.key !== key) return;
+  const grades = (cur.labels || {}).jobs || {};
+  $("#recs").innerHTML = list.length ? list.map((n) => `<div class="row">
+      <div>
+        <span class="name" style="cursor:default">${n.rank ? n.rank + ". " : ""}${esc(n.title)}</span>
+        ${n.extra ? `<span class="badge b-user">${n.rank ? "이전 판정 · 지금 " + n.rank + "위" : "직접 추가"}</span>` : ""}
+        ${n.postings < 5 ? `<span class="badge b-mid">공고 ${n.postings}건</span>` : ""}
+        <div class="meta">${esc(n.path)}${n.score != null ? " · 점수 " + n.score.toFixed(3) : ""} · 공고 ${n.postings}건</div>
+        ${n.pairs.length ? `<details><summary>근거: 내 능력단위 → 이 직무 능력단위</summary><ul class="pairs">${n.pairs.map(([a, b, s]) =>
+          `<li>${esc(a)} → ${esc(b)} (${s.toFixed(2)})</li>`).join("")}</ul></details>` : ""}
+      </div>
+      <div>${seg(GRADES, grades[n.code], `data-op="job" data-target="${n.code}"`)}</div>
+    </div>`).join("") : '<div class="empty">연결된 능력단위가 없어 추천을 계산할 수 없습니다. 위에서 능력단위를 추가해 주세요.</div>';
+}
+
+async function doSearch() {
+  const q = $("#searchUnit").value.trim();
+  if (!q) return;
+  const list = await api("/api/search?q=" + encodeURIComponent(q));
+  $("#searchResults").innerHTML = list.length ? list.map((u) => `<div class="row"><div>
+      <span class="name" style="cursor:default">${esc(u.name)}</span> <span class="sub">(${esc(u.job_title)})</span>
+      <div class="meta">${unitMeta(u)}</div></div><div><button class="btn small" data-addunit="${u.code}">추가</button></div></div>`).join("")
+    : '<div class="empty">찾은 능력단위가 없습니다.</div>';
+}
+
+document.addEventListener("click", async (e) => {
+  const t = e.target;
+  const item = t.closest(".item");
+  if (item) return openPersona(item.dataset.key);
+  if (t.dataset.quote) { quote = t.dataset.quote; renderCareer(); return; }
+  if (t.matches(".seg button")) {
+    const on = t.classList.contains("on");
+    if (t.dataset.op === "link") {
+      await save({ op: "link", code: t.dataset.code, mark: on ? null : t.dataset.value });
+      await refresh();
+    } else {
+      await save({ op: "job", target: t.dataset.target, grade: on ? null : t.dataset.value });
+      loadRecs();
+    }
+    return;
+  }
+  if (t.dataset.addunit) { await save({ op: "add_unit", code: t.dataset.addunit }); $("#status").textContent = "능력단위 추가됨 — 추천 다시 계산"; return refresh(); }
+  if (t.dataset.remove) { await save({ op: "remove_unit", code: t.dataset.remove }); return refresh(); }
+  if (t.id === "doSearch") return doSearch();
+  if (t.id === "addJob") return addJob();
+  if (t.id === "next") {
+    await save({ op: "note", text: $("#note").value });
+    await save({ op: "done", value: true });
+    await loadList();
+    const rest = personas.filter((p) => !p.done && p.key !== cur.key);
+    if (rest.length) openPersona(rest[0].key); else { renderMain(); loadRecs(); $("#status").textContent = "모든 페르소나 판정 완료"; }
+  }
+});
+
+document.addEventListener("change", async (e) => {
+  if (e.target.id === "done") { await save({ op: "done", value: e.target.checked }); await loadList(); }
+  if (e.target.id === "note") await save({ op: "note", text: e.target.value });
+  if (e.target.id === "postFilter") { minPostings = e.target.checked ? 5 : 0; loadRecs(); }
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && e.target.id === "searchUnit") doSearch();
+  if (e.key === "Enter" && e.target.id === "extraJob") addJob();
+});
+
+async function addJob() {
+  const title = $("#extraJob").value.trim();
+  const j = allJobs.find((x) => x.title === title);
+  if (!j) { $("#status").textContent = "목록에 있는 직무명을 골라 주세요"; return; }
+  await save({ op: "job", target: j.code, grade: "possible" });
+  $("#extraJob").value = "";
+  loadRecs();
+}
+
+Promise.all([loadList(), api("/api/alljobs").then((j) => { allJobs = j; })])
+  .then(() => { if (personas.length) openPersona((personas.find((p) => !p.done) || personas[0]).key); });
+</script>
+</body>
+</html>

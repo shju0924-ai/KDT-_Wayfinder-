@@ -6,6 +6,7 @@ NCS에는 자동화 점수가 없으므로 과업 명칭을 표준화하는 근�
 """
 from __future__ import annotations
 
+import bisect
 import hashlib
 import logging
 import re
@@ -37,56 +38,8 @@ NCS_URL = "https://www.data.go.kr/data/15063879/openapi.do"
 
 EXTERNAL_WEIGHT = 0.25
 TASK_WEIGHT = 1 - EXTERNAL_WEIGHT
-# 직업명 매칭 점수(_title_similarity) 하한. 규칙을 통과한 매칭의 최솟값(0.7×0.67 + 0.3×0.25 ≈ 0.54)이 넘는다
-MATCH_THRESHOLD = 0.5
-# 매칭 규칙: 찾는 직업명 단어의 이 비율 이상이 자료 직업명에 있어야 한다
-_QUERY_COVERAGE_MIN = 0.67
-# 자료 직업명 단어 중 이 비율 이상이 겹쳐야 한다 — 'Sales Representatives, Wholesale and Manufacturing, …'(8단어)
-# 처럼 긴 O*NET 이름도 핵심 2단어가 같으면 통과시키는 수준
-_SOURCE_COVERAGE_MIN = 0.25
-# 단독으로는 직업을 특정하지 못하는 핵심 명사 — 'Manager' 하나로 'Project Manager' 에 붙지 않게 한다
-_GENERIC_HEADS = {
-    "manager", "assistant", "clerk", "specialist", "operator", "officer", "agent", "representative",
-    "technician", "analyst", "engineer", "director", "supervisor", "employee", "staff", "consultant",
-}
-
-
 def _round(value: float) -> float:
     return round(max(0.0, min(100.0, value)), 1)
-
-
-def _title_tokens(value: str) -> list[str]:
-    cleaned = re.sub(r"[^a-z0-9 ]+", " ", value.lower())
-    return [re.sub(r"(?<=[a-z]{3})s$", "", t) for t in cleaned.split() if len(t) > 1 and t not in _TITLE_STOPWORDS]
-
-
-def _title_similarity(left: str, right: str) -> float:
-    """영문 직업명 매칭 점수(0~1) — left 는 찾는 직업명(LLM), right 는 노출도 자료의 직업명.
-
-    문자열 유사도(SequenceMatcher)는 'Nursing Assistant' 를 'Sewing assistant' 와 0.85로 붙였고,
-    단어 겹침 ÷ 긴 쪽 단어 수는 같은 직업도 표기가 길면 놓쳤다('Translators' ↔ 'Interpreters and
-    Translators' 0.5). 그래서 세 조건을 모두 볼 때만 매칭으로 본다 — 핵심 명사(마지막 단어)가 자료
-    직업명에 있고, 찾는 직업명 단어 대부분이 들어 있고, 자료 직업명과도 일정 비율 겹칠 것.
-    점수는 찾는 쪽 포함률 0.7 + 자료 쪽 포함률 0.3. 조건을 못 넘으면 0."""
-    left_tokens, right_tokens = _title_tokens(left), _title_tokens(right)
-    a, b = set(left_tokens), set(right_tokens)
-    if not a or not b:
-        return 0.0
-    head = left_tokens[-1]
-    if head not in b or (len(a) == 1 and head in _GENERIC_HEADS):
-        return 0.0
-    # 자료 직업명의 첫 단어(대개 분야 수식어)도 찾는 직업명에 있어야 한다 — 'Tellers' 가 'Fortune Teller',
-    # 'Office Clerks' 가 'Pass Office Clerk' 에 붙는 것을 막는다
-    if right_tokens[0] not in a:
-        return 0.0
-    common = len(a & b)
-    query_cov, source_cov = common / len(a), common / len(b)
-    if query_cov < _QUERY_COVERAGE_MIN or source_cov < _SOURCE_COVERAGE_MIN:
-        return 0.0
-    return 0.7 * query_cov + 0.3 * source_cov
-
-
-_TITLE_STOPWORDS = {"and", "of", "the", "other", "all", "workers", "worker", "in", "except", "for", "general"}
 
 
 # 업무별 주효과는 두 점수로 정한다 — LLM 라벨은 점수와 어긋났다(자동화 점수 3.5인데 'automation').
@@ -161,55 +114,160 @@ def _load_occupation_rows(db: Session) -> list[AutomationOccupationScore]:
         return []
 
 
-def _find_occupation_signals(
-    db: Session,
-    occupation_title_en: str,
-    rows: list[AutomationOccupationScore] | None = None,
-) -> tuple[list[float], list[RiskSource]]:
-    if rows is None:
-        rows = _load_occupation_rows(db)
-    if not rows or not occupation_title_en.strip():
-        return [], []
+# Anthropic Economic Index 는 Claude 사용 기록에서 관측된 과업 비중이다. 0점(756개 직업 중 411개)은
+# '노출도 0'이 아니라 '관측 없음'이라 점수로 쓰지 않는다 — 평균에 넣으면 0.0 표시·반토막 점수가 됐다(e2e 3차)
+AEI_SOURCE = "Anthropic Economic Index"
 
-    best_by_source: dict[str, tuple[float, AutomationOccupationScore]] = {}
+
+def _has_observation(row) -> bool:
+    return not (row.source == AEI_SOURCE and float(row.score) <= 0)
+
+
+def exposure_percentiles(rows: list) -> dict[tuple[str, str], float]:
+    """출처별 원점수 → 직업 간 상대 순위 0~100 (100에 가까울수록 AI로 대체될 가능성이 높은 직업).
+
+    출처마다 척도가 달라(ILO 8~69 잠재 노출도, Anthropic 0~74.5 관측 비중) 원점수를 그대로 평균하면
+    의미가 없다. 같은 출처 안의 순위(동점은 평균 순위)로 바꿔야 서로 섞을 수 있다. 관측 없는 행은 뺀다."""
+    by_source: defaultdict[str, list] = defaultdict(list)
     for row in rows:
-        similarity = _title_similarity(occupation_title_en, row.occupation_title)
-        current = best_by_source.get(row.source)
-        if current is None or similarity > current[0]:
-            best_by_source[row.source] = (similarity, row)
+        if _has_observation(row):
+            by_source[row.source].append(row)
+    out: dict[tuple[str, str], float] = {}
+    for source_rows in by_source.values():
+        scores = sorted(float(r.score) for r in source_rows)
+        n = len(scores)
+        for row in source_rows:
+            if n == 1:
+                out[(row.source, row.occupation_code)] = 50.0
+                continue
+            s = float(row.score)
+            less = bisect.bisect_left(scores, s)
+            equal = bisect.bisect_right(scores, s) - less
+            out[(row.source, row.occupation_code)] = _round((less + (equal - 1) / 2) / (n - 1) * 100)
+    return out
 
-    scores: list[float] = []
-    sources: list[RiskSource] = []
-    for source_name, (similarity, row) in best_by_source.items():
-        if similarity < MATCH_THRESHOLD:
+
+# 직업 매칭 후보 — 출처마다 한국어 직무명과 임베딩이 가까운 직업 이 수만큼을 LLM에 보여 준다
+OCCUPATION_SHORTLIST = 5
+# 노출도 직업명 벡터 디스크 캐시 (backend/.cache — .gitignore 대상)
+OCCUPATION_INDEX_DIR = Path(__file__).resolve().parents[2] / ".cache"
+
+_occupation_index = None  # (rows, np.ndarray) — 프로세스당 한 번 만든다
+_occupation_lock = threading.Lock()
+
+
+def _occupation_rows_index(db: Session):
+    """노출도 자료 직업명(약 3,300개) 벡터 — 한국어 직무명과 bge-m3 다국어 임베딩으로 비교한다."""
+    global _occupation_index
+    if _occupation_index is not None:
+        return _occupation_index
+    with _occupation_lock:
+        if _occupation_index is not None:
+            return _occupation_index
+        # 순서를 고정해야 아래 캐시 키가 매번 같다
+        rows = sorted(_load_occupation_rows(db), key=lambda r: (r.source, r.occupation_code))
+        if not rows:
+            return None
+        texts = [r.occupation_title for r in rows]
+        key = hashlib.sha256(
+            "\n".join([embedding.EMBEDDING_MODEL, embedding.EMBEDDING_REVISION, *texts]).encode("utf-8")
+        ).hexdigest()[:16]
+        cache = OCCUPATION_INDEX_DIR / f"occupation_index_{key}.npy"
+        if cache.exists():
+            _occupation_index = (rows, np.load(cache))
+            return _occupation_index
+        logger.info("노출도 직업명 색인 생성 — %d건 (첫 실행만)", len(texts))
+        arr = np.asarray(embedding.embed_passages(texts), dtype=np.float32)
+        try:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            np.save(cache, arr)
+        except OSError as e:
+            logger.warning("노출도 직업명 색인 저장 실패: %r", e)
+        _occupation_index = (rows, arr)
+        return _occupation_index
+
+
+def warm_occupation_index() -> None:
+    """서버 시작 시 백그라운드로 색인을 준비한다 — 첫 요청이 색인 생성을 기다리지 않게."""
+    from app.db.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        _occupation_rows_index(db)
+    except Exception as e:
+        logger.warning("노출도 직업명 색인 사전 준비 실패: %r", e)
+    finally:
+        db.close()
+
+
+def occupation_shortlists(db: Session, titles: list[str]) -> tuple[list[dict[str, list]], dict]:
+    """직무명마다 출처별 후보 직업 [(행, 유사도)] OCCUPATION_SHORTLIST 개 + 출처별 0~100 순위표."""
+    index = _occupation_rows_index(db)
+    if index is None or not titles:
+        return [{} for _ in titles], {}
+    rows, vecs = index
+    q = np.asarray(embedding.embed_passages([t or "" for t in titles]), dtype=np.float32)
+    sims = q @ vecs.T
+    by_source: defaultdict[str, list[int]] = defaultdict(list)
+    for i, r in enumerate(rows):
+        by_source[r.source].append(i)
+    out: list[dict[str, list]] = []
+    for t, row_sims in zip(titles, sims):
+        if not (t or "").strip():
+            out.append({})
             continue
-        scores.append(row.score)
-        sources.append(
-            RiskSource(
-                source=source_name,
-                label=f"{row.occupation_title} ({row.occupation_code})",
-                score=_round(row.score),
-                url=row.source_url,
-                note=(
-                    f"직업명 유사도 {similarity * 100:.0f}%. "
-                    "AI 노출도이며 고용 대체 확률이 아닙니다."
-                ),
+        out.append({
+            src: [(rows[i], float(row_sims[i])) for i in sorted(idx, key=lambda i: -row_sims[i])[:OCCUPATION_SHORTLIST]]
+            for src, idx in by_source.items()
+        })
+    return out, exposure_percentiles(rows)
+
+
+async def exposures_for_titles(titles: list[str]) -> list[tuple[list[float], list[RiskSource]]]:
+    """한국어 직무명마다 출처별 AI 노출도 — (출처별 0~100 점수, 출처 근거). 매칭이 없으면 ([], []).
+
+    임베딩으로 출처별 후보를 추리고(occupation_shortlists), LLM이 같은 직업을 고른다(llm.match_occupations).
+    LLM이 영문 직업명을 지어 내고 단어 규칙으로 맞추던 방식은 물류 직무에서 8장 모두 매칭에 실패했다."""
+    if not titles:
+        return []
+    shortlists, percentiles = await embedding.run_db(occupation_shortlists, titles)
+    choices = await llm.match_occupations(
+        [(t, {src: [r.occupation_title for r, _ in cands] for src, cands in sl.items()}) for t, sl in zip(titles, shortlists)]
+    )
+    out: list[tuple[list[float], list[RiskSource]]] = []
+    for title, sl, chosen in zip(titles, shortlists, choices):
+        scores: list[float] = []
+        sources: list[RiskSource] = []
+        for src, cands in sl.items():
+            no = chosen.get(src, -1)
+            if no < 0 or no >= len(cands):
+                continue
+            row, sim = cands[no]
+            # 고른 직업이 '관측 없음'이면 다른 후보로 넘어가지 않는다 — 다른 직업 점수가 붙는다
+            pct = percentiles.get((row.source, row.occupation_code))
+            if pct is None:
+                logger.info("노출도 관측 없음 — 제외: %s %s", src, row.occupation_title)
+                continue
+            # 화면(진단·직무 카드)에는 환산한 0~100점만 낸다 — 원점수는 척도가 출처마다 달라 섞이면 헷갈린다. 로그에만 남긴다
+            logger.debug("노출도 %s %s 원점수 %g → %s", src, row.occupation_title, float(row.score), pct)
+            scores.append(pct)
+            sources.append(
+                RiskSource(
+                    source=src,
+                    label=f"{row.occupation_title} ({row.occupation_code})",
+                    score=pct,
+                    url=row.source_url,
+                    note=(
+                        "직업 간 순위로 환산한 0~100점 — 100에 가까울수록 AI로 대체될 가능성이 높은 직업. "
+                        f"직업명은 임베딩 후보(유사도 {sim * 100:.0f}%) 중 AI가 고른 것입니다."
+                    ),
+                )
             )
+        logger.info(
+            "직무 노출도 %r → %s", title,
+            ", ".join(f"{s.source}: {s.label} {s.score}" for s in sources) or "매칭 없음",
         )
-    return scores, sources
-
-
-def occupation_exposures(
-    db: Session, titles_en: list[str | None]
-) -> list[tuple[float | None, list[RiskSource]]]:
-    """후보 직무(영문 표준 직업명)마다 공개 직업 AI 노출도 — (출처 평균 점수, 출처별 근거).
-
-    STEP 3 카드용. 판정 없이 점수와 매칭된 직업명·출처만 돌려준다. 매칭이 없으면 (None, [])."""
-    rows = _load_occupation_rows(db)
-    out: list[tuple[float | None, list[RiskSource]]] = []
-    for title in titles_en:
-        scores, sources = _find_occupation_signals(db, title or "", rows)
-        out.append((_round(sum(scores) / len(scores)) if scores else None, sources))
+        out.append((scores, sources))
     return out
 
 
@@ -238,7 +296,7 @@ def _ncs_unit_index(db: Session):
             # 순서를 고정해야 아래 캐시 키가 매번 같다 — ORDER BY 가 없으면 행 순서가 바뀌어 색인을 다시 만들었다
             units = [
                 u for u in db.scalars(select(NcsUnit).order_by(NcsUnit.ncs_code)).all()
-                if "구버전" not in u.unit_name
+                if "구버전" not in u.unit_name and "삭제" not in u.unit_name
             ]
         except SQLAlchemyError:
             db.rollback()
@@ -361,7 +419,12 @@ async def diagnose(
     ]
 
     # 동기 쿼리는 스레드에서 — 다른 사용자의 요청을 막지 않게 (embedding.run_db 참고)
-    empirical_scores, sources = await embedding.run_db(_find_occupation_signals, analysis.occupation_title_en)
+    # 노출도는 참고 보정값 — 조회가 실패해도 업무 점수만으로 진단한다
+    try:
+        [(empirical_scores, sources)] = await exposures_for_titles([job_title or analysis.job_title])
+    except Exception as e:
+        logger.warning("직업 노출도 조회 실패: %r", e)
+        empirical_scores, sources = [], []
     ncs_matches, ncs_source = await embedding.run_db(_match_ncs, analysis.tasks)
     if ncs_source:
         sources.append(ncs_source)
@@ -381,6 +444,7 @@ async def diagnose(
                 rationale=task.rationale,
                 ncs_code=ncs.ncs_code if ncs else None,
                 ncs_unit=ncs.unit_name if ncs else None,
+                source_quote=task.source_quote,
             )
         )
 
@@ -405,7 +469,7 @@ async def diagnose(
     formula_note = (
         f"업무별 점수 {calculation['task_based_score']}점을 중심으로"
         + (
-            f", 직업 노출도 {calculation['empirical_score']}점을 25% 반영해 보정했습니다."
+            f", 직업 AI 노출도(직업 간 순위 0~100) {calculation['empirical_score']}점을 25% 반영해 보정했습니다."
             if empirical_scores
             else " 계산했으며 매칭 가능한 직업 노출도는 보정에 넣지 않았습니다."
         )

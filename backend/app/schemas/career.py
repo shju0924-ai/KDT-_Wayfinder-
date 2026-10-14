@@ -14,10 +14,28 @@ TransitionDifficulty = Literal["낮음", "보통", "높음"]
 
 
 # ── STEP 1. 경력 입력·진단 ──────────────────────────────────
+class AutomationTask(BaseModel):
+    """경력 서사에서 추출한 업무와 업무별 AI 영향."""
+
+    name: str
+    share_percent: float = Field(..., ge=0, le=100, description="직무에서 차지하는 비중")
+    automation_score: float = Field(..., ge=0, le=100)
+    ai_assistance_score: float = Field(..., ge=0, le=100)
+    effect: TaskEffect = Field(..., description="업무의 주효과 — 자동화 | AI 보조 | 사람 중심")
+    rationale: str
+    ncs_code: str | None = None
+    ncs_unit: str | None = None
+    source_quote: str | None = Field(None, description="이 업무의 근거가 된 경력 서사 원문 구절")
+
+
 class CareerInput(BaseModel):
     """이력서 텍스트 또는 대화형 인터뷰 응답."""
     raw_text: str = Field(..., description="이력서 원문 또는 인터뷰 응답 전문")
     current_job_title: str | None = Field(None, description="현재(최근) 직무명")
+    diagnosed_tasks: list[AutomationTask] = Field(
+        default_factory=list,
+        description="STEP 1 진단 업무 — 업무에 붙은 NCS 코드를 STEP 2 능력단위 후보에 더한다(없으면 건너뜀)",
+    )
 
 
 class ParsedResume(BaseModel):
@@ -47,26 +65,16 @@ class SurveyInput(BaseModel):
     aspiration: str | None = Field(None, description="Q6. 앞으로 해보고 싶은 일 (선택)")
 
 
-class AutomationTask(BaseModel):
-    """경력 서사에서 추출한 업무와 업무별 AI 영향."""
-
-    name: str
-    share_percent: float = Field(..., ge=0, le=100, description="직무에서 차지하는 비중")
-    automation_score: float = Field(..., ge=0, le=100)
-    ai_assistance_score: float = Field(..., ge=0, le=100)
-    effect: TaskEffect = Field(..., description="업무의 주효과 — 자동화 | AI 보조 | 사람 중심")
-    rationale: str
-    ncs_code: str | None = None
-    ncs_unit: str | None = None
-
-
 class RiskSource(BaseModel):
     """위험도 진단에 사용한 데이터 또는 방법론 출처."""
 
     source: str
     label: str
     url: str
-    score: float | None = Field(None, ge=0, le=100)
+    score: float | None = Field(
+        None, ge=0, le=100,
+        description="AI 노출도 출처면 직업 간 순위로 환산한 0~100점(100에 가까울수록 AI로 대체될 가능성이 높음)",
+    )
     note: str | None = None
 
 
@@ -97,17 +105,23 @@ class SurveyCareer(BaseModel):
 
 # ── STEP 2. 역량 프로필 ────────────────────────────────────
 class SkillItem(BaseModel):
-    """전이 가능한 역량 단위."""
-    name: str = Field(..., description="역량명 (예: 갈등 완화, 비정형 문제 해결)")
-    category: str = Field(..., description="역량 분류 (예: 대인, 분석, 실행)")
-    evidence: str = Field(..., description="경력 서사에서 추출한 근거 문장")
+    """경력에서 확인한 역량 — NCS 능력단위(국가직무능력표준의 직무별 능력)로 표현한다."""
+    ncs_code: str = Field(..., description="NCS 능력단위 코드 (예: 0203020101_17v2)")
+    name: str = Field(..., description="능력단위명 (예: 전표관리)")
+    ncs_job: str = Field(..., description="능력단위가 속한 NCS 직무(세분류) (예: 회계·감사)")
+    ncs_path: str = Field(..., description="NCS 분류 경로 (대분류 > 중분류 > 소분류 > 세분류)")
+    definition: str = Field(..., description="능력단위 정의(축약)")
+    evidence: str | None = Field(
+        None, description="이 능력단위의 근거가 된 경력 서사 원문 구절 — 사용자가 직접 추가하면 None"
+    )
+    user_added: bool = Field(False, description="사용자가 NCS 검색으로 직접 추가한 능력단위인지")
     confirmed: bool = Field(False, description="사용자 검토·확정 여부")
 
 
 class SkillProfile(BaseModel):
     skills: list[SkillItem]
     current_job_title: str | None = Field(
-        None, description="현재(최근) 직무명 — 사용자 입력값 또는 경력 서사에서 추출. STEP 3 같은 직무 제외에 사용"
+        None, description="현재(최근) 직무명 — 사용자 입력값(설문). 없으면 프론트가 STEP 1 진단의 job_title 을 쓴다. STEP 3 같은 직무 제외에 사용"
     )
 
 
@@ -134,9 +148,15 @@ class JobMatch(BaseModel):
         default_factory=list,
         description="추천 근거가 약한 이유 — 숨기지 않고 표시해 사용자가 판단하게 한다. 비어 있으면 근거 충분",
     )
+    license_required: bool = Field(
+        False, description="국가 면허가 있어야 일할 수 있는 직업인지 — 걸러내지 않고 라벨만 붙인다"
+    )
     ai_exposure_score: float | None = Field(
         None, ge=0, le=100,
-        description="이 직무의 공개 AI 노출도 참고 점수(출처 평균). 판정 없음. 매칭 자료가 없으면 None",
+        description=(
+            "이 직무의 AI 노출도 0~100 — 100에 가까울수록 AI로 대체될 가능성이 높은 직무. "
+            "공개 자료(ILO·Anthropic)의 직업 간 순위를 출처별로 평균. 매칭 자료가 없으면 None"
+        ),
     )
     ai_exposure_sources: list[RiskSource] = Field(
         default_factory=list, description="노출도 출처별 점수와 매칭된 직업명"

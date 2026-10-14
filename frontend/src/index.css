@@ -980,6 +980,29 @@ button:disabled {
   color: var(--ink-3);
 }
 
+.skill-intro {
+  margin: 4px 0 0;
+  font-size: 0.82rem;
+  color: var(--ink-3);
+}
+
+/* NCS 능력단위 검색 결과 — 목록이 길어도 카드가 끝없이 늘지 않게 */
+.skill-results {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.skill-results .btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .skill-remove {
   flex-shrink: 0;
   width: 26px;
