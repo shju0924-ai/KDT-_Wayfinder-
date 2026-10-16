@@ -16,7 +16,7 @@
 ## 핵심 규칙
 
 - **스키마 동기화**: `backend/app/schemas/career.py` ↔ `frontend/src/types/api.ts` 는 1:1 대응. 한쪽을 바꾸면 반드시 다른 쪽도 수정.
-- **임베딩 일치**: 모델·리비전·차원(로컬 `BAAI/bge-m3` @ `5617a9f`, 1024차원, max_seq_length 512, sentence-transformers)은 `backend/app/services/embedding.py`, `data-pipeline/embedding/common.py`, `scripts/runpod/embed_server.py`(원격 GPU 임베딩) 가 항상 같아야 하고, `db/models.py` Vector 차원도 일치해야 함. 검색 대상(채용공고·훈련과정)과 검색어(사용자 역량)는 반드시 같은 모델로 임베딩할 것 — 섞으면 유사도가 무의미해짐. 모델을 바꾸면 DB 벡터 전부 재임베딩 필요.
+- **임베딩 일치**: 모델·리비전·차원(로컬 `BAAI/bge-m3` @ `5617a9f`, 1024차원, max_seq_length 512, sentence-transformers)은 `backend/app/services/embedding.py`, `data-pipeline/embedding/common.py` 가 항상 같아야 하고, `db/models.py` Vector 차원도 일치해야 함. 검색 대상(채용공고·훈련과정)과 검색어(사용자 역량)는 반드시 같은 모델로 임베딩할 것 — 섞으면 유사도가 무의미해짐. 모델을 바꾸면 DB 벡터 전부 재임베딩 필요.
 - **근거 의무화**: LLM 출력(역량 분해·진단·로드맵)은 항상 evidence/rationale/source 필드를 채워야 함 — 환각 억제가 핵심 설계 포인트.
 - **민감정보**: 이력서 원문은 DB에 저장하지 않는 것이 기본.
 - 실행 방법은 `README.md` 참고.
@@ -26,5 +26,6 @@
 - Windows 10, RAM 8GB. C: 여유 공간이 작아 대용량 캐시·데이터는 D:에 둠 (`HF_HOME=D:\hf-cache`, 페이지파일 D:).
 - DB는 `docker compose up -d` (pgvector/pgvector:pg17, wayfinder/wayfinder@localhost:5432). 데이터는 Docker 볼륨 `wayfinder-pgdata` — Windows 바인드 마운트는 대량 적재 중 크래시가 나서 쓰지 않음. Docker Desktop은 부팅 후 수동 실행.
 - 적재 현황(2026-10-05): job_postings 51,331 / training_courses 18,459 / ncs_units 15,520 / automation_occupation_scores 3,297. 백업 덤프는 `data-pipeline/data/backup/` (`pg_restore -d wayfinder` 로 복원).
-- 전량 임베딩은 로컬 CPU로 하루 이상 걸림 → GPU 서버에서 `python -m embedding.export_vectors` 로 `vectors.npz` 를 만들고, 로컬에서 `EMBED_CACHE=data/vectors.npz` 로 적재 (README 참고).
+- 전량 임베딩은 로컬 CPU로 하루 이상 걸림 — 새로 임베딩하기보다 백업 덤프 복원(`pg_restore`)이 빠름.
+- LLM은 로컬 Ollama만 사용, 임베딩도 로컬 CPU로만 계산 (Claude API·RunPod 원격 서버는 쓰지 않기로 해 코드 삭제함).
 - 모델은 이미 캐시돼 있으므로 `HF_HUB_OFFLINE=1` 로 실행 (허브 접속 시 멈춤 현상 있었음).

@@ -27,7 +27,7 @@ Copy-Item .env.example backend\.env
 Copy-Item .env.example data-pipeline\.env
 ```
 
-`backend/.env`에는 LLM 설정을 채웁니다 — `LLM_PROVIDER=claude`면 `ANTHROPIC_API_KEY`, `LLM_PROVIDER=ollama`면 키 없이 로컬 모델([Ollama](https://ollama.com) 설치 후 `ollama pull qwen3.5:4b`)을 씁니다. 로컬 모델은 GPU 없는 PC에서 단계당 1~4분 걸립니다. 임베딩은 로컬 모델(`BAAI/bge-m3`)이라 키가 필요 없고, 첫 실행 시 모델(약 2GB)을 자동으로 내려받습니다. 공공데이터까지 새로 수집하려면 `data-pipeline/.env`에 아래 키도 넣습니다.
+LLM은 로컬 모델만 씁니다 — [Ollama](https://ollama.com) 설치 후 `ollama pull qwen3.5:4b` (API 키 불필요). 로컬 모델은 GPU 없는 PC에서 단계당 1~4분 걸립니다. 임베딩은 로컬 모델(`BAAI/bge-m3`)이라 키가 필요 없고, 첫 실행 시 모델(약 2GB)을 자동으로 내려받습니다. 공공데이터까지 새로 수집하려면 `data-pipeline/.env`에 아래 키도 넣습니다.
 
 ```dotenv
 NCS_API_KEY=
@@ -93,49 +93,10 @@ python run_pipeline.py
 
 `python run_pipeline.py --limit 20 --dry-run`으로 DB에 쓰지 않는 소량 점검도 할 수 있습니다.
 
-#### RunPod GPU로 LLM·임베딩 돌리기 (권장)
+#### 품질 회귀 점검
 
-로컬 PC(RAM 8GB)에서는 LLM이 단계당 수 분, 임베딩 모델 로딩만 2분 이상 걸립니다. RunPod GPU Pod(A40 기준)에
-Ollama(`qwen3.5:9b`)와 임베딩 서버를 띄우고 SSH 터널로 연결하면, DB·백엔드·프론트는 로컬 그대로 두고
-4단계 전체가 약 100초로 줄어듭니다.
-
-1. Pod를 SSH(22/TCP) 열린 템플릿으로 만들고, 로컬 공개키(`~/.ssh/id_ed25519.pub`)를 RunPod Settings → SSH Public Keys 에 등록
-2. `scripts/runpod/` 를 Pod의 `/workspace/wayfinder/` 에 올리고 실행 (Pod 재시작 후에도 이것만 다시 실행)
-
-```bash
-bash /workspace/wayfinder/start.sh
-```
-
-3. 로컬에서 터널 열기 — IP·포트는 Pod Jupyter 터미널의 `echo $RUNPOD_PUBLIC_IP $RUNPOD_TCP_PORT_22`
-
-```bash
-ssh -N -L 11434:127.0.0.1:11434 -L 8010:127.0.0.1:8010 root@<IP> -p <PORT> -i ~/.ssh/id_ed25519
-```
-
-4. `backend/.env` 에 `LLM_PROVIDER=ollama`, `OLLAMA_MODEL=qwen3.5:9b`, `EMBEDDING_API_URL=http://localhost:8010`
-
-터널이 끊기면 임베딩은 로컬 계산으로 자동 전환됩니다(느려짐). Pod에 Network Volume이 없으면 Stop 시
-`/workspace` 의 모델이 지워지므로 `start.sh` 가 다시 내려받습니다. 품질 회귀 점검은
-`cd backend && python -m scripts.e2e_eval` (v1 페르소나 4명, 병렬 약 5~6분). `--set v2|resume|ui|all`(쉼표로 여러 개, 예: `resume,ui`) 로
+`cd backend && python -m scripts.e2e_eval` (v1 페르소나 4명). `--set v2|resume|ui|all`(쉼표로 여러 개, 예: `resume,ui`) 로
 다른 세트를 돌립니다 — 세트와 작성 기준은 `backend/scripts/personas/README.md`.
-
-#### GPU 서버에서 임베딩만 계산하기
-
-전량(약 7만 행) 임베딩은 CPU로 하루 이상 걸립니다. GPU 서버(예: RunPod A40, 약 10분)에서 벡터만 계산해 오고 적재는 로컬에서 할 수 있습니다. GPU 서버에는 DB가 필요 없습니다.
-
-```bash
-# GPU 서버: data-pipeline/ 의 embedding/, requirements.txt, data/processed/*.csv 업로드 후
-pip install -r requirements.txt
-python -m embedding.export_vectors          # → data/vectors.npz
-```
-
-```powershell
-# 로컬: vectors.npz 를 data-pipeline\data\ 에 두고
-$env:EMBED_CACHE = "data\vectors.npz"
-python run_pipeline.py --skip-collect
-```
-
-`EMBED_CACHE`에 있는 텍스트는 모델을 실행하지 않고 저장된 벡터를 쓰고, 없는 텍스트만 로컬에서 계산합니다. 모델 리비전·입력 길이·정규화가 같아 로컬 계산 결과와 동일한 벡터입니다(코사인 유사도 1.0 확인). 5,000행 이상을 넣을 때는 HNSW 인덱스를 잠시 지우고 적재한 뒤 다시 만듭니다.
 
 ## 데이터 흐름
 

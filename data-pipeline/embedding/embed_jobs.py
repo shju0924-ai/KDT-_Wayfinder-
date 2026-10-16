@@ -147,7 +147,7 @@ LOAD_CHUNK = 1000
 
 
 def prepare(limit: int | None = None) -> list[dict]:
-    """CSV 로드 → 중복 제거 → 청킹까지 마친 적재 대상 행 (export_vectors.py 와 공유)."""
+    """CSV 로드 → 중복 제거 → 청킹까지 마친 적재 대상 행."""
     rows = load_seoul() + load_gg()
     # 수집 CSV에 같은 공고가 페이지 중복으로 여러 번 들어오는 경우가 있어(경기 7.2만 행 중 고유 6.7천 건)
     # source_id 기준으로 한 번만 임베딩·적재한다 — 어차피 upsert로 마지막 행만 남는다

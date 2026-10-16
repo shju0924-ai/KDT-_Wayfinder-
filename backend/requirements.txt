@@ -15,4 +15,3 @@ numpy==2.5.3
 # 로컬 임베딩(BAAI/bge-m3). GPU 없는 환경은 torch CPU 빌드 권장:
 #   pip install torch --index-url https://download.pytorch.org/whl/cpu
 sentence-transformers==6.1.0
-anthropic==1.11.0

@@ -140,7 +140,6 @@ def test_llm_cache_roundtrip(monkeypatch, tmp_path):
         calls.append(user)
         return schema(gaps=["SQL"])
 
-    monkeypatch.setattr(settings, "llm_provider", "ollama")
     monkeypatch.setattr(llm, "_ollama_parse", fake_ollama)
     first = asyncio.run(llm.extract_skill_gaps(["상담"], "데이터 분석가"))
     second = asyncio.run(llm.extract_skill_gaps(["상담"], "데이터 분석가"))
@@ -381,3 +380,12 @@ def test_roadmap_without_any_candidate_skips_llm(monkeypatch):
     items = asyncio.run(llm.build_roadmap_items(["LC/TT 결제 처리", "발주 일정 조율"], "무역 사무원", {}))
     assert [i["learning_item"] for i in items] == ["훈련과정 없음 — LC/TT 결제 처리", "훈련과정 없음 — 발주 일정 조율"]
     assert all(i["course"] is None and i["duration_weeks"] == 0 for i in items)
+
+
+def test_snap_quote_restores_original_spacing():
+    """화면의 근거는 원문 글자 그대로 — 4b가 '5명'을 '5 명'으로 옮겨도 원문 구절로 되돌린다."""
+    src = "강성 민원 고객을 진정시켜 해지 방어율 팀 1위를 했습니다. 신입 상담원 5명의 응대 스크립트 교육도 맡았습니다."
+    assert llm.snap_quote("신입 상담원 5 명의 응대 스크립트 교육도 맡았습니다", src) == "신입 상담원 5명의 응대 스크립트 교육도 맡았습니다"
+    assert llm.snap_quote("일평균 고객 60 명 응대", "- 입출금, 일평균 고객 60명 응대") == "일평균 고객 60명 응대"
+    # 조사·어미를 바꿔 옮긴 인용은 원문에서 찾을 수 없으니 그대로 둔다
+    assert llm.snap_quote("스크립트 교육을 맡음", src) == "스크립트 교육을 맡음"

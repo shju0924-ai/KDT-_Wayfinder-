@@ -16,8 +16,7 @@ load_dotenv()
 # (bge-m3는 query/passage 프리픽스 구분이 없어 backend 검색어도 같은 방식으로 임베딩)
 # API 키 불필요. 첫 실행 시 모델(약 2GB)을 Hugging Face에서 내려받아 캐시한다.
 EMBEDDING_MODEL = "BAAI/bge-m3"
-# 로컬 캐시(D:\hf-cache 등)의 refs/main 과 같은 커밋 — GPU 서버(RunPod)에서 받을 때도
-# 동일 가중치를 쓰도록 고정한다
+# 로컬 HF 캐시의 refs/main 과 같은 커밋 — 다른 PC에서 받을 때도 동일 가중치를 쓰도록 고정한다
 EMBEDDING_REVISION = "5617a9f61b028005a4858fdac845db406aefb181"
 EMBEDDING_DIM = 1024  # backend/app/services/embedding.py 와 일치해야 함
 # 입력 토큰 상한. bge-m3는 최대 8,192토큰까지 받지만 CPU에서는 길이에 비례해 느려지므로
@@ -62,51 +61,20 @@ def get_model():
     return _model
 
 
-# ── 사전 계산 벡터 캐시 ─────────────────────────────────────
-# CPU 임베딩이 너무 느려 GPU 서버에서 export_vectors.py 로 벡터만 계산해 온 경우,
-# EMBED_CACHE=<npz 경로> 를 지정하면 캐시에 있는 텍스트는 모델을 돌리지 않고 재사용한다.
-# (캐시에 없는 텍스트만 로컬 모델로 계산)
-_cache: dict[str, list[float]] | None = None
-
-
-def save_vector_cache(path: str, texts: list[str], vecs) -> None:
-    import numpy as np
-
-    np.savez_compressed(path, texts=np.array(texts, dtype=object), vecs=np.asarray(vecs, dtype=np.float32))
-
-
-def _get_cache() -> dict[str, list[float]]:
-    global _cache
-    if _cache is None:
-        _cache = {}
-        path = os.getenv("EMBED_CACHE")
-        if path:
-            import numpy as np
-
-            data = np.load(path, allow_pickle=True)  # 우리가 만든 파일만 지정할 것
-            if data["vecs"].shape[1] != EMBEDDING_DIM:
-                raise ValueError(f"캐시 차원 {data['vecs'].shape[1]} ≠ {EMBEDDING_DIM}")
-            _cache = {t: [float(x) for x in v] for t, v in zip(data["texts"], data["vecs"])}
-            print(f"벡터 캐시 {len(_cache)}건 로드: {path}")
-    return _cache
-
-
 def embed_passages(texts: list[str]) -> list[list[float]]:
     """텍스트 목록 → passage 임베딩 (정규화, 배치는 모델이 내부 분할).
 
     CPU 임베딩은 느리므로 같은 텍스트는 한 번만 계산해 결과를 재사용한다
     (채용공고는 제목·조건이 같은 공고가 많아 고유 텍스트가 원문 행보다 훨씬 적다).
     """
-    cache = _get_cache()
     unique = list(dict.fromkeys(texts))
-    missing = [t for t in unique if t not in cache]
-    by_text = {t: cache[t] for t in unique if t in cache}
-    if missing:
-        vecs = get_model().encode(
-            missing, batch_size=BATCH_SIZE, normalize_embeddings=True, show_progress_bar=len(missing) > BATCH_SIZE
-        )
-        # psycopg 벡터 삽입 전 파이썬 float로 통일
-        by_text.update({t: [float(x) for x in v] for t, v in zip(missing, vecs)})
+    if not unique:
+        return []
+    vecs = get_model().encode(
+        unique, batch_size=BATCH_SIZE, normalize_embeddings=True, show_progress_bar=len(unique) > BATCH_SIZE
+    )
+    # psycopg 벡터 삽입 전 파이썬 float로 통일
+    by_text = {t: [float(x) for x in v] for t, v in zip(unique, vecs)}
     return [by_text[t] for t in texts]
 
 

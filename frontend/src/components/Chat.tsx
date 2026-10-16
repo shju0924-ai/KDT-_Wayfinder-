@@ -60,6 +60,7 @@ export default function Chat({ onJourney, onNewChat }: Props) {
   const [career, setCareer] = useState<CareerInput | null>(null);
   const [risk, setRisk] = useState<RiskDiagnosis | null>(null);
   const [draftSkills, setDraftSkills] = useState<SkillItem[] | null>(null);
+  const [skillSuggestions, setSkillSuggestions] = useState<SkillItem[]>([]);
   const [confirmedSkills, setConfirmedSkills] = useState<SkillItem[] | null>(null);
   const [jobSearchTrack, setJobSearchTrack] = useState<JobSearchTrack | null>(null);
   const [jobs, setJobs] = useState<JobMatch[] | null>(null);
@@ -232,6 +233,7 @@ export default function Chat({ onJourney, onNewChat }: Props) {
     try {
       // STEP 1 진단 업무를 함께 보내, 업무에 붙은 NCS 코드도 능력단위 후보로 쓰게 한다
       const profile = await generateProfile({ ...career, diagnosed_tasks: risk?.tasks ?? [] });
+      setSkillSuggestions(profile.suggestions ?? []);
       setDraftSkills(profile.skills);
       // 이력서·자유 텍스트 경로는 직무명 입력이 없으므로, STEP 1 진단이 경력 서사에서 뽑은 직무명을 기억해
       // STEP 3에서 '같은 직무' 후보를 걸러내는 데 쓴다. STEP 2 요청 뒤에 넣는 이유: 직무명이 있으면 STEP 2가
@@ -383,6 +385,7 @@ export default function Chat({ onJourney, onNewChat }: Props) {
         return draftSkills ? (
           <SkillProfileCard
             initial={draftSkills}
+            suggestions={skillSuggestions}
             locked={confirmedSkills !== null}
             onConfirm={handleSkillsConfirm}
           />

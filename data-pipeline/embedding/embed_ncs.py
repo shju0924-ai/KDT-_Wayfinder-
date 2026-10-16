@@ -8,7 +8,7 @@
 (backend/scripts/ncs_link.py 실험 기록).
 
 문장 형식·고르는 규칙은 backend/app/services/ncs_link.py 가 읽는 기준과 같아야 한다(정의 축약 _short_def 포함).
-CPU로 1만4천 건 × 2 = 약 2시간. GPU 서버 벡터나 예전에 계산한 벡터가 있으면 EMBED_CACHE 로 재사용한다.
+CPU로 1만4천 건 × 2 = 약 2시간.
 
 사용:
     python -m embedding.embed_ncs             # 벡터가 없는 단위만

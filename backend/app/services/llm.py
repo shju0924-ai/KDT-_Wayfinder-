@@ -8,8 +8,7 @@ STEP 2 경력 → NCS 능력단위 연결은 app/services/ncs_link.py (이 모�
 STEP 1·2는 순수 생성, STEP 4는 pgvector로 검색한 훈련과정만 근거로 쓰는 RAG.
 단계별 시스템 프롬프트 문구는 prompts.py 에 모여 있다 — 이 파일은 스키마·호출·후처리를 맡는다.
 
-프로바이더는 LLM_PROVIDER 로 고른다 — claude(Anthropic API) 또는 ollama(로컬 모델).
-로컬 소형 모델은 출력이 느리고(CPU 약 5tok/s) 지시를 덜 지키므로, 어느 프로바이더든
+LLM은 로컬 모델(Ollama)만 쓴다. 소형 모델은 출력이 느리고(CPU 약 5tok/s) 지시를 덜 지키므로
 역량명 필드는 보유 역량 enum 으로 스키마에서 강제하고 출력 개수·길이를 스키마로 묶는다.
 """
 import hashlib
@@ -24,7 +23,6 @@ from pathlib import Path
 from typing import Literal, TypeVar
 
 import httpx
-from anthropic import AsyncAnthropic
 from pydantic import BaseModel, Field, ValidationError, create_model
 
 from app.core.config import settings
@@ -32,21 +30,9 @@ from app.services import prompts
 
 logger = logging.getLogger(__name__)
 
-# 2026-09-18: LLM 호출을 OpenAI(gpt-5.6-luna)에서 Anthropic Claude로 전환.
-# 2026-10-01: 로컬 모델(Ollama) 선택지 추가 — API 크레딧 없이도 전체 흐름이 돌도록.
-# 임베딩(app/services/embedding.py)은 로컬 모델 BAAI/bge-m3 사용 — Anthropic은 임베딩 API를 제공하지 않음.
-MAX_TOKENS = 16000
-
-_client: AsyncAnthropic | None = None
+# 임베딩(app/services/embedding.py)은 로컬 모델 BAAI/bge-m3 사용.
 
 T = TypeVar("T", bound=BaseModel)
-
-
-def get_client() -> AsyncAnthropic:
-    global _client
-    if _client is None:
-        _client = AsyncAnthropic(api_key=settings.anthropic_api_key)
-    return _client
 
 
 async def _parse(
@@ -54,15 +40,14 @@ async def _parse(
     system: str,
     user: str,
     *,
-    max_tokens: int = MAX_TOKENS,
-    local_max_tokens: int,
+    max_tokens: int,
 ) -> T | None:
     """구조화 출력 호출 — 스키마에 맞게 파싱된 결과, 실패하면 None.
 
-    local_max_tokens 는 로컬 모델 출력 상한(num_predict)이다. 상한이 없으면 클라이언트가
+    max_tokens 는 출력 상한(num_predict)이다. 상한이 없으면 클라이언트가
     끊겨도 Ollama 서버가 생성을 계속해 다음 요청이 대기열에 막힌다 — 반드시 지정한다.
 
-    같은 입력(프로바이더·모델·스키마·프롬프트)이면 캐시된 결과를 돌려준다 — 로컬 모델은
+    같은 입력(모델·스키마·프롬프트)이면 캐시된 결과를 돌려준다 — 로컬 모델은
     호출당 수 분이라, 같은 경력으로 다시 보거나 트랙을 오가는 경우 대기 시간을 없앤다.
     """
     system = f"{prompts.KOREAN_ONLY_RULE}\n\n{system}"
@@ -75,17 +60,7 @@ async def _parse(
         except ValidationError:
             pass  # 스키마가 바뀐 뒤의 옛 캐시 — 새로 호출한다
 
-    if settings.llm_provider == "ollama":
-        out = await _ollama_parse(schema, system, user, local_max_tokens)
-    else:
-        resp = await get_client().messages.parse(
-            model=settings.anthropic_model,
-            max_tokens=max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-            output_format=schema,
-        )
-        out = resp.parsed_output
+    out = await _ollama_parse(schema, system, user, max_tokens)
     if out is not None:
         _cache_put(key, out.model_dump_json())
     return out
@@ -99,9 +74,8 @@ _cache_conn: sqlite3.Connection | None = None
 
 
 def _cache_key(schema: type[BaseModel], system: str, user: str) -> str:
-    model = settings.ollama_model if settings.llm_provider == "ollama" else settings.anthropic_model
     raw = json.dumps(
-        [settings.llm_provider, model, schema.model_json_schema(), system, user],
+        ["ollama", settings.ollama_model, schema.model_json_schema(), system, user],
         ensure_ascii=False,
         sort_keys=True,
     )
@@ -377,7 +351,7 @@ async def analyze_automation_tasks(
         _TaskAnalysisOut,
         prompts.DIAGNOSIS_SYSTEM,
         f"[경력 서사]\n{career_text}{hint}",
-        local_max_tokens=2000,
+        max_tokens=2000,
     )
     if out is None:
         raise RuntimeError("업무별 자동화 분석 결과를 파싱하지 못했습니다.")
@@ -385,6 +359,8 @@ async def analyze_automation_tasks(
         task.name = clean_dangling(task.name)
     # 업무가 2개 미만으로 줄면 진단이 성립하지 않는다 — 그때는 거르지 않고 로그만 남긴다
     out.tasks = keep_quoted(out.tasks, career_text, "업무", min_keep=2)
+    for task in out.tasks:
+        task.source_quote = snap_quote(task.source_quote, career_text)
     return out
 
 
@@ -411,6 +387,19 @@ def is_quoted(quote: str, source: str) -> bool:
         return True
     grams = {q[i : i + 2] for i in range(len(q) - 1)}
     return sum(g in s for g in grams) / len(grams) >= QUOTE_MIN_COVERAGE
+
+
+def snap_quote(quote: str, source: str) -> str:
+    """인용을 원문 그대로의 구절로 되돌린다 — 4b는 '5명'을 '5 명'으로 옮기는 식으로 공백·문장부호를 바꿨다.
+    공백·문장부호만 다른 구절이 원문에 있으면 원문 쪽을 돌려주고, 없으면(조사·어미를 바꾼 경우) 그대로 둔다."""
+    quote = quote.strip()
+    if not quote or quote in source:
+        return quote
+    chars = _QUOTE_NOISE.sub("", quote)
+    if len(chars) < 3:
+        return quote
+    m = re.search(f"(?:{_QUOTE_NOISE.pattern})?".join(map(re.escape, chars)), source)
+    return m.group(0) if m else quote
 
 
 def keep_quoted(items: list, source: str, label: str, min_keep: int) -> list:
@@ -512,8 +501,7 @@ async def judge_job_matches(
         prompts.JOB_JUDGE_SYSTEM,
         f"[현재 직무]\n{current_job or '확인되지 않음'}\n\n"
         f"[사용자 보유 역량]\n{', '.join(skills)}\n\n[후보 직무 {len(postings)}개]\n{listing}",
-        max_tokens=4000,
-        local_max_tokens=240 * len(postings),
+        max_tokens=240 * len(postings),
     )
     results = [_default_judgement() for _ in postings]
     if out is None:
@@ -627,7 +615,7 @@ async def suggest_training_targets(
         f"[현재 직무]\n{current_job or '확인되지 않음'}\n\n"
         f"[보유 역량 (역량 — 근거)]\n" + "\n".join(profile_lines)
         + f"\n\n[NCS 직무 후보]\n{_candidate_lines(candidates)}",
-        local_max_tokens=1800,
+        max_tokens=1800,
     )
     if out is None:
         return []
@@ -702,7 +690,7 @@ async def match_occupations(items: list[tuple[str, dict[str, list[str]]]]) -> li
         _occupation_match_schema(len(items), options),
         prompts.OCCUPATION_MATCH_SYSTEM,
         f"[직무 {len(items)}개]\n{listing}",
-        local_max_tokens=60 * len(items) + 200,
+        max_tokens=60 * len(items) + 200,
     )
     if out is None:
         return results
@@ -822,8 +810,7 @@ async def extract_skill_gaps(skills: list[str], target_job: str) -> list[str]:
         _GapOut,
         prompts.GAP_SYSTEM,
         f"[보유 역량]\n{', '.join(skills)}\n\n[목표 직무]\n{target_job}",
-        max_tokens=2000,
-        local_max_tokens=300,
+        max_tokens=300,
     )
     return [g for g in out.gaps if g not in skills] if out else []
 
@@ -873,7 +860,7 @@ async def build_roadmap_items(
             _roadmap_schema(len(gaps)),
             prompts.ROADMAP_SYSTEM,
             f"[목표 직무]\n{target_job}\n\n[격차별 실제 훈련과정 후보]\n" + "\n\n".join(blocks),
-            local_max_tokens=150 * len(gaps) + 100,
+            max_tokens=150 * len(gaps) + 100,
         )
     if out is None:
         return []

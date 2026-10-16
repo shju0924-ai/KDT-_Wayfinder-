@@ -11,13 +11,12 @@ import asyncio
 import json
 import logging
 import threading
+from datetime import date
 from urllib.parse import urlencode
 
-import httpx
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
 from app.db.session import SessionLocal, close_quietly
 
 logger = logging.getLogger(__name__)
@@ -49,38 +48,9 @@ def get_model():
 
 
 def _encode(texts: list[str]) -> list[list[float]]:
-    if settings.embedding_api_url:
-        vecs = _encode_remote(texts)
-        if vecs is not None:
-            return vecs
     # 정규화 후 저장·검색 — pgvector 코사인 거리(<=>)와 일관
     vecs = get_model().encode(texts, batch_size=16, normalize_embeddings=True)
     return [[float(x) for x in v] for v in vecs]
-
-
-def _encode_remote(texts: list[str]) -> list[list[float]] | None:
-    """GPU 임베딩 서버로 계산한다. 실패하거나 모델·리비전이 다르면 None — 호출부가 로컬로 계산한다.
-
-    로컬 CPU는 모델 로드만 수 분(RAM 8GB)이라 서버가 있으면 그쪽을 쓴다."""
-    try:
-        resp = httpx.post(
-            f"{settings.embedding_api_url.rstrip('/')}/embed",
-            json={"texts": texts},
-            timeout=httpx.Timeout(60, connect=3),
-        )
-        resp.raise_for_status()
-        body = resp.json()
-    except (httpx.HTTPError, ValueError) as e:
-        logger.warning("원격 임베딩 실패, 로컬로 계산: %r", e)
-        return None
-    if body.get("model") != EMBEDDING_MODEL or body.get("revision") != EMBEDDING_REVISION:
-        logger.warning("원격 임베딩 모델 불일치(%s@%s), 로컬로 계산", body.get("model"), body.get("revision"))
-        return None
-    vecs = body.get("vectors") or []
-    if len(vecs) != len(texts) or any(len(v) != EMBEDDING_DIM for v in vecs):
-        logger.warning("원격 임베딩 응답 형식 이상, 로컬로 계산")
-        return None
-    return vecs
 
 
 async def embed_query(text_input: str) -> list[float]:
@@ -159,6 +129,7 @@ _COURSE_SEARCH_SQL = text(
         FROM training_courses
         WHERE embedding IS NOT NULL
           AND end_date::date >= CURRENT_DATE
+          AND start_date::date >= CAST(:min_start AS date)
         ORDER BY embedding <=> CAST(:qvec AS vector)
         LIMIT :candidates
     ) c
@@ -349,12 +320,13 @@ async def search_similar_courses(gap_text: str, limit: int = 5) -> list[dict]:
     if not gap_text.strip():
         return []
     qvec = await embed_query(gap_text)
-    courses = await run_db(
-        _execute_hnsw,
-        f"SELECT * FROM ({_COURSE_SEARCH_SQL.text}) t ORDER BY similarity DESC LIMIT :limit",
-        {"qvec": json.dumps(qvec), "limit": limit},
-        COURSE_CANDIDATES,
-    )
+    sql = f"SELECT * FROM ({_COURSE_SEARCH_SQL.text}) t ORDER BY similarity DESC LIMIT :limit"
+    params = {"qvec": json.dumps(qvec), "limit": limit}
+    # 개강 전 과정만 신청할 수 있다 — 종료일만 보던 때는 이미 개강한 과정(10/4 개강, 10/15 추천)이 나왔다.
+    # 수집분이 오래돼 개강 전 과정이 없으면 끝나지 않은 과정으로 물러선다(화면에 교육 기간이 함께 보인다)
+    courses = await run_db(_execute_hnsw, sql, {**params, "min_start": date.today().isoformat()}, COURSE_CANDIDATES)
+    if not courses:
+        courses = await run_db(_execute_hnsw, sql, {**params, "min_start": "1900-01-01"}, COURSE_CANDIDATES)
     labels = await run_db(_ncs_labels, [c["ncs_cd"] for c in courses if c.get("ncs_cd")])
     for course in courses:
         course["source_url"] = build_work24_course_url(course["source_id"])

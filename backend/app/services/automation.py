@@ -281,17 +281,17 @@ _ncs_lock = threading.Lock()
 
 
 def _ncs_unit_index(db: Session):
-    """전체 NCS 능력단위('단위명 (세분류)') 벡터 — 프로세스당 한 번 원격 GPU로 만들어 메모리에 둔다(약 50MB).
+    """전체 NCS 능력단위('단위명 (세분류)') 벡터 — 프로세스당 한 번 만들어 메모리에 둔다(약 50MB).
 
-    원격 임베딩 서버가 없으면 만들지 않는다 — CPU로 1만여 건은 수십 분이라 진단 응답을 붙잡는다."""
+    처음 한 번은 로컬 CPU로 1만여 건을 임베딩하느라 수십 분 걸린다 — 서버 시작 시 warm_ncs_index 가
+    백그라운드로 만들고 디스크에 저장해, 다음부터는 파일을 읽는다. 만드는 동안 들어온 진단은 잠금을
+    기다리지 않고 NCS 매칭 없이 진행한다(_match_ncs 참고)."""
     global _ncs_index
     if _ncs_index is not None:
         return _ncs_index
     with _ncs_lock:
         if _ncs_index is not None:
             return _ncs_index
-        if not embedding.settings.embedding_api_url:
-            return None
         try:
             # 순서를 고정해야 아래 캐시 키가 매번 같다 — ORDER BY 가 없으면 행 순서가 바뀌어 색인을 다시 만들었다
             units = [
@@ -302,7 +302,7 @@ def _ncs_unit_index(db: Session):
             db.rollback()
             return None
         texts = [f"{u.unit_name} ({u.sub_category})" for u in units]
-        # 1만여 건 임베딩은 GPU로도 2분 남짓 — 디스크에 저장해 두고 단위 목록·모델이 같으면 다시 쓴다
+        # 1만여 건 임베딩은 CPU로 수십 분 — 디스크에 저장해 두고 단위 목록·모델이 같으면 다시 쓴다
         key = hashlib.sha256(
             "\n".join([embedding.EMBEDDING_MODEL, embedding.EMBEDDING_REVISION, *texts]).encode("utf-8")
         ).hexdigest()[:16]
@@ -310,14 +310,8 @@ def _ncs_unit_index(db: Session):
         if cache.exists():
             _ncs_index = (units, np.load(cache))
             return _ncs_index
-        vecs: list[list[float]] = []
-        for i in range(0, len(texts), 500):  # 원격 서버 요청당 상한 512
-            part = embedding._encode_remote(texts[i : i + 500])
-            if part is None:
-                logger.warning("NCS 색인 생성 실패 — 원격 임베딩 서버 응답 없음")
-                return None
-            vecs.extend(part)
-        arr = np.asarray(vecs, dtype=np.float32)
+        logger.info("NCS 색인 생성 시작 — 능력단위 %d건 로컬 임베딩", len(texts))
+        arr = np.asarray(embedding._encode(texts), dtype=np.float32)
         try:
             cache.parent.mkdir(parents=True, exist_ok=True)
             np.save(cache, arr)
@@ -343,26 +337,40 @@ def warm_ncs_index() -> None:
 def _match_ncs(
     db: Session,
     tasks: list,
+    job_title: str | None = None,
 ) -> tuple[dict[int, NcsUnit], RiskSource | None]:
     """업무명마다 가장 가까운 NCS 능력단위를 임베딩 유사도로 찾는다.
 
     단어 일치 규칙은 '관리' 같은 흔한 말로 '접수 및 예약 관리' → '항공기 운항 스케줄 관리'를 냈고,
     규칙을 조이면 맞는 것까지 다 놓쳤다. 단어 검색으로 후보를 300건 추리면 맞는 단위가 빠지기도 해서
     전체 단위와 비교한다. 실측(bge-m3): 맞음 — 예약관리(병원안내) 0.715, CNC선반 가공 프로그래밍 0.700,
-    고객상담 0.724 / 틀림 — HTML 마크업↔편집 레이아웃 0.653, 신입 교육↔청소년활동 협업 0.606."""
-    index = _ncs_unit_index(db)
+    고객상담 0.724 / 틀림 — HTML 마크업↔편집 레이아웃 0.653, 신입 교육↔청소년활동 협업 0.606.
+
+    업무명만으로 고르면 글자가 비슷한 다른 분야 단위가 기준을 넘었다(은행 텔러 '정산 검증 및 사고 예방 점검'
+    → '정화 검증(토양관리)' 0.700, '고객 입출금 및 송금 처리' → '외환 결제' 0.704). 그래서 고르기는
+    '직무명: 업무명'으로 해서 분야를 맞추고(→ '입지급 거래(창구사무)'), 붙일지는 업무명만의 유사도로 정한다
+    — 직무명을 붙이면 유사도가 전반적으로 낮아져 같은 기준을 쓸 수 없다."""
+    # 색인은 warm_ncs_index 만 만든다 — 진단 요청이 수십 분짜리 첫 생성을 기다리면 안 된다.
+    # 아직 없고 만드는 중도 아니면(시작 시 DB가 꺼져 있었던 경우 등) 백그라운드로 다시 시작만 한다
+    index = _ncs_index
+    if index is None and not _ncs_lock.locked():
+        threading.Thread(target=warm_ncs_index, daemon=True).start()
     if index is None or not tasks:
         return {}, None
     units, unit_vecs = index
+    names = [t.name for t in tasks]
+    job = (job_title or "").strip()
     try:
-        task_vecs = np.asarray(embedding._encode([t.name for t in tasks]), dtype=np.float32)
+        vecs = np.asarray(embedding._encode(names + ([f"{job}: {n}" for n in names] if job else [])),
+                          dtype=np.float32)
     except Exception as e:  # NCS 는 표기용 근거 — 실패하면 붙이지 않는다
         logger.warning("NCS 매칭 임베딩 실패: %r", e)
         return {}, None
-    sims = task_vecs @ unit_vecs.T  # 정규화된 벡터라 내적 = 코사인
+    sims = vecs[: len(names)] @ unit_vecs.T  # 정규화된 벡터라 내적 = 코사인
+    pick_sims = vecs[len(names):] @ unit_vecs.T if job else sims
     matches: dict[int, NcsUnit] = {}
-    for i, row in enumerate(sims):
-        best = int(row.argmax())
+    for i, (row, pick_row) in enumerate(zip(sims, pick_sims, strict=True)):
+        best = int(pick_row.argmax())
         if row[best] >= NCS_MATCH_MIN:
             matches[i] = units[best]
 
@@ -425,7 +433,7 @@ async def diagnose(
     except Exception as e:
         logger.warning("직업 노출도 조회 실패: %r", e)
         empirical_scores, sources = [], []
-    ncs_matches, ncs_source = await embedding.run_db(_match_ncs, analysis.tasks)
+    ncs_matches, ncs_source = await embedding.run_db(_match_ncs, analysis.tasks, job_title or analysis.job_title)
     if ncs_source:
         sources.append(ncs_source)
 

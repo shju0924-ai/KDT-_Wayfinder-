@@ -996,6 +996,18 @@ button:disabled {
   overflow-y: auto;
 }
 
+/* AI가 고르지 않은 추천 후보 — 사용자가 판단해 추가한다 */
+.skill-suggest {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--line);
+}
+
+.skill-suggest-head {
+  font-size: 0.86rem;
+  font-weight: 600;
+}
+
 .skill-results .btn {
   flex-shrink: 0;
   display: inline-flex;

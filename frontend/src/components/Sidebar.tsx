@@ -58,7 +58,7 @@ export default function Sidebar({ journey, onNewChat, theme, onToggleTheme }: Pr
         </ol>
       </nav>
 
-      <div className="sidebar-foot">디자인 프로토타입 — 예시 데이터로 동작합니다</div>
+      <div className="sidebar-foot">공공데이터와 로컬 AI로 계산한 참고 결과입니다</div>
     </aside>
   );
 }

@@ -87,7 +87,7 @@ LOAD_CHUNK = 1000
 
 
 def prepare(limit: int | None = None) -> list[dict]:
-    """CSV 로드 → 청킹까지 마친 적재 대상 행 (export_vectors.py 와 공유)."""
+    """CSV 로드 → 청킹까지 마친 적재 대상 행."""
     rows = load_courses()
     if limit:
         rows = rows[:limit]

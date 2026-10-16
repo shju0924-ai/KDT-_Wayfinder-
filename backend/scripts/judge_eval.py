@@ -95,7 +95,7 @@ async def judge_persona(result: dict, career: str) -> dict[str, list[dict]]:
             _schema(len(items)),
             JUDGE_SYSTEM,
             f"[경력 서사]\n{career}\n\n[평가 기준]\n{CRITERIA[kind]}\n\n[추천 항목 {len(items)}개]\n{listing}",
-            local_max_tokens=120 * len(items) + 200,
+            max_tokens=120 * len(items) + 200,
         )
         scored: dict[int, dict] = {}
         for s in (parsed.scores if parsed else []):

@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wayfinder 구조도</title>
+<style>
+:root{--bg:#fbfaf7;--fg:#2c2c2a;--muted:#5f5e5a;--line:#b4b2a9;--card:#ffffff;
+--p-bg:#eeedfe;--p-bd:#534ab7;--p-fg:#3c3489;--c-bg:#faece7;--c-bd:#993c1d;--c-fg:#712b13;
+--t-bg:#e1f5ee;--t-bd:#0f6e56;--t-fg:#085041;--a-bg:#faeeda;--a-bd:#854f0b;--a-fg:#633806}
+@media (prefers-color-scheme:dark){:root{--bg:#1f1f1d;--fg:#e8e6df;--muted:#b4b2a9;--line:#5f5e5a;--card:#2c2c2a;
+--p-bg:#3c3489;--p-bd:#afa9ec;--p-fg:#eeedfe;--c-bg:#712b13;--c-bd:#f0997b;--c-fg:#faece7;
+--t-bg:#085041;--t-bd:#5dcaa5;--t-fg:#e1f5ee;--a-bg:#633806;--a-bd:#ef9f27;--a-fg:#faeeda}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:-apple-system,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;line-height:1.5}
+main{max-width:560px;margin:0 auto;padding:20px 16px 40px}
+h1{font-size:20px;font-weight:600;margin:0 0 4px}
+h2{font-size:17px;font-weight:600;margin:32px 0 12px;padding-top:16px;border-top:1px solid var(--line)}
+.sub{color:var(--muted);font-size:13px;margin:0 0 8px}
+.group{border:1px dashed var(--line);border-radius:14px;padding:12px;margin:0}
+.group>.label{font-size:13px;color:var(--muted);margin:0 0 8px;font-weight:600}
+.box{border:1px solid;border-radius:10px;padding:10px 12px;text-align:center}
+.box b{display:block;font-size:15px}
+.box span{display:block;font-size:12.5px;opacity:.85}
+.p{background:var(--p-bg);border-color:var(--p-bd);color:var(--p-fg)}
+.c{background:var(--c-bg);border-color:var(--c-bd);color:var(--c-fg)}
+.t{background:var(--t-bg);border-color:var(--t-bd);color:var(--t-fg)}
+.a{background:var(--a-bg);border-color:var(--a-bd);color:var(--a-fg)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.grid3{display:grid;grid-template-columns:1fr;gap:8px}
+.stack{display:grid;gap:8px}
+.arrow{text-align:center;color:var(--muted);font-size:18px;line-height:1;margin:6px 0}
+.legend{display:flex;flex-wrap:wrap;gap:12px;font-size:12.5px;color:var(--muted);margin-top:14px}
+.legend i{display:inline-block;width:12px;height:12px;border-radius:3px;border:1px solid;vertical-align:-1px;margin-right:4px}
+.note{font-size:12.5px;color:var(--muted);margin:8px 0 0}
+</style>
+</head>
+<body>
+<main>
+<h1>Wayfinder 구조도</h1>
+<p class="sub">로컬 전용 구성 · 2026-10-14 기준 (Claude API·RunPod 제거 후)</p>
+
+<h2>1. 아키텍처</h2>
+<div class="box p"><b>프론트엔드 · React + Vite</b><span>채팅형 UI · 단계별 카드</span></div>
+<div class="arrow">↓</div>
+<div class="group">
+  <p class="label">백엔드 FastAPI · /api 라우터</p>
+  <div class="grid2">
+    <div class="box p"><b>diagnosis</b><span>입력·자동화 진단</span></div>
+    <div class="box p"><b>profile</b><span>역량 프로필</span></div>
+    <div class="box p"><b>jobs</b><span>다음 직무 매핑</span></div>
+    <div class="box p"><b>roadmap</b><span>학습 로드맵</span></div>
+  </div>
+</div>
+<div class="arrow">↓</div>
+<div class="group">
+  <p class="label">services</p>
+  <div class="stack">
+    <div class="box p"><b>llm · prompts</b><span>구조화 출력 · 근거 필드 필수</span></div>
+    <div class="box p"><b>embedding</b><span>bge-m3 · 로컬 CPU · pgvector 검색</span></div>
+    <div class="box p"><b>ncs_link · ncs_jobs · automation</b><span>NCS 연결 · 자동화 점수 · 노출도</span></div>
+  </div>
+</div>
+<div class="arrow">↓</div>
+<div class="grid3">
+  <div class="box a"><b>Ollama 로컬 LLM</b><span>qwen3.5:4b · API 키 불필요</span></div>
+  <div class="box a"><b>로컬 캐시 backend/.cache</b><span>NCS·직업명 색인 · LLM 결과(24시간)</span></div>
+  <div class="box t"><b>PostgreSQL + pgvector</b><span>채용공고 5.1만 · 훈련과정 1.8만 · NCS 1.5만 · 노출도 3,297</span></div>
+</div>
+<div class="arrow">↑ 적재</div>
+<div class="group">
+  <p class="label">data-pipeline (배치)</p>
+  <div class="stack">
+    <div class="box t"><b>공공데이터</b><span>서울·경기 채용 · HRD-Net · NCS · ILO/Anthropic 노출도</span></div>
+    <div class="arrow">↓</div>
+    <div class="box t"><b>collectors</b><span>수집·필터 → CSV</span></div>
+    <div class="arrow">↓</div>
+    <div class="box t"><b>embedding 적재</b><span>청킹 · 로컬 벡터화 · DB 적재</span></div>
+  </div>
+</div>
+<div class="legend"><span><i class="p"></i>앱 코드</span><span><i class="a"></i>이 PC에서 실행</span><span><i class="t"></i>데이터 저장·적재</span></div>
+
+<h2>2. 사용자 흐름</h2>
+<div class="grid2" style="grid-template-columns:1fr 1fr 1fr">
+  <div class="box c"><b>이력서</b><span>PDF·DOCX·HWP</span></div>
+  <div class="box c"><b>직접 입력</b><span>채팅 텍스트</span></div>
+  <div class="box c"><b>설문</b><span>이력서 없을 때</span></div>
+</div>
+<div class="arrow">↓</div>
+<div class="box p"><b>STEP 1 · AI 자동화 영향 진단</b><span>업무별 점수 + NCS 매칭 · 판정하지 않음</span></div>
+<div class="arrow">↓</div>
+<div class="box p"><b>STEP 2 · NCS 역량 프로필</b><span>능력단위 + 경력 원문 인용 · STEP 1 NCS 코드도 후보</span></div>
+<div class="arrow">↓</div>
+<div class="box c"><b>역량 검토·삭제·추가 → 확정</b><span>빠진 역량은 NCS 검색으로 추가</span></div>
+<div class="arrow">↓ 탐색 방향 선택</div>
+<div class="grid2">
+  <div class="box c"><b>인접 직무로 전환</b><span>역량별 실채용 공고 검색</span></div>
+  <div class="box c"><b>교육 후 새 분야로</b><span>훈련과정 있는 NCS 직무</span></div>
+</div>
+<div class="arrow">↓</div>
+<div class="box p"><b>STEP 3 · 직무 후보 카드</b><span>적합도 · AI 노출도 · 전환 난이도</span></div>
+<div class="arrow">↓ 직무 선택</div>
+<div class="box p"><b>STEP 4 · 학습 로드맵</b><span>부족 역량 → 실제 훈련과정(RAG)</span></div>
+<div class="arrow">↓</div>
+<div class="box c"><b>실행 체크 → 회고</b><span>여정 5단계 완주</span></div>
+<div class="legend"><span><i class="p"></i>시스템 처리(API)</span><span><i class="c"></i>사용자가 입력·결정</span></div>
+<p class="note">AI는 점수와 근거만 보여 주고, 고르는 것은 사용자입니다.</p>
+</main>
+</body>
+</html>

@@ -20,11 +20,12 @@ async def generate_profile(career: CareerInput) -> SkillProfile:
     # STEP 1 진단 업무에 붙은 NCS 코드도 후보에 넣는다 — 경력 구절 검색이 놓친 능력단위를 LLM이 고를 수 있게
     extra = [t.ncs_code for t in career.diagnosed_tasks if t.ncs_code]
     try:
-        skills = await ncs_link.link_career(career.raw_text, career.current_job_title, extra)
+        linked = await ncs_link.link_detail(career.raw_text, career.current_job_title, extra)
     except Exception as e:
         raise upstream_error("능력단위 연결 실패", e) from e
     # 현재 직무명은 사용자가 적은 값(설문)만 돌려준다 — 이력서 경로는 프론트가 STEP 1 진단의 job_title 을 쓴다
-    return SkillProfile(skills=skills, current_job_title=career.current_job_title)
+    return SkillProfile(skills=linked["skills"], suggestions=linked["suggestions"],
+                        current_job_title=career.current_job_title)
 
 
 @router.get("/units", response_model=list[SkillItem], summary="NCS 능력단위 검색 — 빠진 역량 직접 추가용")

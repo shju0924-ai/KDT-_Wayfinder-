@@ -88,15 +88,17 @@ export interface SkillItem {
   ncs_path: string;
   /** 능력단위 정의(축약) */
   definition: string;
-  /** 이 능력단위의 근거가 된 경력 서사 원문 구절 — 사용자가 직접 추가하면 null */
+  /** 이 능력단위의 근거가 된 경력 서사 원문 구절 — 사용자가 NCS 검색으로 추가하면 null */
   evidence?: string | null;
-  /** 사용자가 NCS 검색으로 직접 추가한 능력단위인지 */
+  /** 사용자가 직접 추가한 능력단위인지 — NCS 검색 또는 추천 후보에서 선택 */
   user_added: boolean;
   confirmed: boolean;
 }
 
 export interface SkillProfile {
   skills: SkillItem[];
+  /** 검색 후보 중 AI가 고르지 않은 능력단위 — 사용자가 보고 골라 추가한다. evidence 는 후보를 찾은 경력 원문 구절 */
+  suggestions?: SkillItem[];
   /** 현재(최근) 직무명 — 사용자 입력값(설문). 없으면 STEP 1 진단의 job_title 을 쓴다. STEP 3 같은 직무 제외에 사용 */
   current_job_title?: string | null;
 }

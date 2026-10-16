@@ -1,6 +1,5 @@
 """환경 설정 — backend/.env 에서 로드 (.env.example 참고)."""
 from pathlib import Path
-from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -15,11 +14,7 @@ class Settings(BaseSettings):
     # DB 연결 시도 상한(초). localhost 는 ::1·127.0.0.1 을 차례로 시도하므로 최악은 이 값의 2배
     db_connect_timeout_seconds: int = 5
 
-    # LLM 프로바이더: claude(Anthropic API) 또는 ollama(로컬 모델, 키 불필요)
-    # 임베딩은 어느 쪽이든 로컬 모델(BAAI/bge-m3)이라 키가 필요 없음
-    llm_provider: Literal["claude", "ollama"] = "claude"
-    anthropic_api_key: str = ""
-    anthropic_model: str = "claude-opus-5"
+    # LLM 은 로컬 모델(Ollama)만 쓴다 — 키 불필요. 임베딩도 로컬 모델(BAAI/bge-m3)
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen3.5:4b"
     # 입력+출력 토큰 합 상한. 프롬프트가 이보다 길면 앞부분이 잘려 지시문이 사라진다
@@ -33,9 +28,6 @@ class Settings(BaseSettings):
     llm_cache_path: str = str(Path(__file__).resolve().parents[2] / ".cache" / "llm_cache.sqlite")
     # 캐시 보존 기한(시간). 값에 경력 서사에서 뽑은 근거 문장이 들어가므로 오래 두지 않는다
     llm_cache_ttl_hours: float = 24
-    # 원격 임베딩 서버(scripts/runpod/embed_server.py) 주소. 비우면 로컬 CPU로 계산한다.
-    # 원격이 실패하거나 모델 리비전이 다르면 로컬 계산으로 돌아간다
-    embedding_api_url: str = ""
 
     # 공공데이터
     work24_api_key: str = ""
